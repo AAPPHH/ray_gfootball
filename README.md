@@ -81,39 +81,18 @@ A high-performance reinforcement learning system for Google Research Football th
 ## 🚀 Usage
 
 ### Training from Scratch
-
-learner = LeagueLearner(
-    num_workers=32,
-    rollout_len=512,
-    batch_size=128,
-    lr=0.0005,
-    gamma=0.997,
-    entropy_coeff=0.01,
-    value_coeff=0.5,
-    sil_coeff=0.5,
-    d_model=512,
-    lstm_hidden=512,
-    checkpoint_dir="./checkpoints_league",
-    max_snapshots=15,
-    skill_matched_prob=0.35,
-    champion_prob=0.50,
-    exploration_prob=0.15,
-)
-
-learner.train(max_time=360000)  # 100 hours
+```bash
+python main/train.py '{"agent": "impala"}'
+python main/train.py '{"agent": "dreamer"}'
 ```
+Hyperparameters live in `CONFIG` in `main/train.py` (sections `learner`, `impala`, `dreamer`, `eval`, `paths`); overrides are a JSON dict. Each agent writes to `<checkpoint_dir>/<agent>`.
 
 ### Training with Warmstart
-```python
-learner = LeagueLearner(
-    # ... same as above ...
-    warmstart_path="path/to/checkpoint.pt",
-    expert_parquet="path/to/expert.parquet",
-    expert_threshold=0.7,  # Disable expert when >70% vs hard
-)
-
-learner.train(max_time=360000)
+```bash
+python main/train.py '{"mode": "bc"}'
+python main/train.py '{"agent": "impala"}'
 ```
+`paths.warmstart` and `paths.expert_parquet` are used by the IMPALA agent; the expert gate (`impala.expert_threshold`) closes at >70% vs the hard bot.
 
 ### Monitoring Output
 ```
@@ -132,13 +111,16 @@ learner.train(max_time=360000)
 
 ```
 main/
-├── impala_league.py      # Main training script (monolithic)
+├── football_env.py       # Env, bots, features
+├── league.py             # TrueSkill league, workers, evaluator
+├── agents.py             # Agent interface, IMPALA, Dreamer, BC warmstart
+├── train.py              # CONFIG and LeagueTrainer
+├── smoke.py              # Short run of either agent
 ├── expert.parquet        # Expert demonstrations (optional)
-├── checkpoints_league/   # Training checkpoints
-│   ├── league.pkl        # League state (ratings, members)
-│   ├── snapshot_*.pt     # Agent snapshots
-│   └── ckpt_*.pt         # Training checkpoints
-└── README.md
+└── <checkpoint_dir>/<agent>/
+    ├── league.pkl        # League state (ratings, members, agent kind)
+    ├── snapshot_*.pt     # Agent snapshots
+    └── ckpt_*.pt         # Training checkpoints
 ```
 
 ## ⚙️ Hyperparameters

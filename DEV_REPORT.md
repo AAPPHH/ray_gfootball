@@ -1,3 +1,5 @@
+> Layout-Hinweis: `full_league.py` und `weckick_im.py` sind auf dem Branch dev-modular in `football_env.py`, `league.py`, `agents.py` (inkl. `BCWarmstart`) und `train.py` aufgeteilt; `LeagueLearner` ist `train.LeagueTrainer`. Die Abschnitte unten beschreiben den Stand vor der Aufteilung.
+
 # Bericht: Konvergenz-Fixes auf der dev-Branch
 
 **Datum:** 2026-07-11 · **Basis:** dev (`2372476`)
@@ -9,15 +11,15 @@
 1. **Diagnose** des Konvergenz-Einbruchs auf dev via Branch-Diff main↔dev
    (Abschnitt 2) plus SOTA-Recherche (TiZero, Kaggle-Gewinner) als
    Referenzrahmen (Quellen am Ende).
-2. **`main/full_league.py` repariert** (Abschnitte 3.1–3.5): Gegnerauswahl
+2. **`main/full_league.py` (heute `league.py`, `agents.py`, `train.py`) repariert** (Abschnitte 3.1–3.5): Gegnerauswahl
    mit Lernfront-Gewichtung und 50 % Challenge-Self-Play, Hyperparameter
    zurück auf konvergenzfähige Werte, Rollouts von vollen Episoden auf
    512er-Chunks, Expert-Buffer auf 512er-Fenster, diverse Bugfixes
    (lexikografische Snapshot-Sortierung, Draw-Zählung).
 3. **Reward-Entscheidung:** bleibt **scoring only** (Abschnitt 3.4) — ein
    testweise eingebautes Checkpoint-Curriculum wurde wieder entfernt.
-4. **BC-Warmstart repariert** (Abschnitt 3.6): `weckick_im.py` nutzt jetzt
-   das Netz aus `full_league.py` (main-Muster statt Duplikat-Definition),
+4. **BC-Warmstart repariert** (Abschnitt 3.6): `BCWarmstart` in `agents.py` nutzt jetzt
+   das Netz aus `league.py`/`train.py` (main-Muster statt Duplikat-Definition),
    `bc_warmstart_v2.pt` neu trainiert — **Val-Accuracy 46.8 %**, lädt
    `strict=True` ins League-Netz. dev ist damit startklar.
 5. **Aufgeräumt** (Abschnitt 3.7): 29 nicht mehr relevante Experiment-Files
@@ -130,25 +132,25 @@ Parameter nutzbar.
   (`1 − wins − draws`).
 - Zwei Dispatch-Codepfade im Train-Loop zu `_dispatch()` zusammengefasst.
 
-### 3.6 BC-Warmstart repariert (`main/weckick_im.py`)
+### 3.6 BC-Warmstart repariert (`BCWarmstart` in `main/agents.py`)
 
 Der Kaltstart war gebrochen: Das alte `bc_warmstart.pt` (17.02.) stammte von
 mains Architektur (2-Layer-Encoder, Policy 512→128→19, PopArt auf 512) und
 passte nicht mehr zu devs Netz — `strict=False` fängt nur fehlende Keys ab,
-nicht Shape-Mismatches, also warf `full_league.py` beim Start einen
-RuntimeError. Ursache: devs Architektur-Umbau pflegte in `weckick_im.py` eine
+nicht Shape-Mismatches, also warf `league.py`/`train.py` beim Start einen
+RuntimeError. Ursache: devs Architektur-Umbau pflegte in `BCWarmstart` in `agents.py` eine
 **Duplikat-Netzdefinition**, die nie zusammen mit dem BC-Checkpoint erneuert
 wurde. Auf main konnte das nicht passieren, weil `bc_train.py` dasselbe Netz
 aus `net.py` importiert.
 
 **Fix (main-Muster übernommen):**
 
-- `weckick_im.py` importiert `Net`/`FeatureEngineer`/Konstanten aus
-  `full_league.py` — nur noch **eine** Netzdefinition im Projekt.
+- `BCWarmstart` in `agents.py` importiert `Net`/`FeatureEngineer`/Konstanten aus
+  `league.py`/`train.py` — nur noch **eine** Netzdefinition im Projekt.
 - BC trainiert das volle League-Netz (Loss nur auf den Policy-Logits,
   Value-Heads bleiben initialisiert) → Checkpoint ist `strict=True`-kompatibel.
 - Neues Artefakt `bc_warmstart_v2.pt` (altes File bleibt unangetastet);
-  `full_league.py` zeigt auf v2.
+  `league.py`/`train.py` zeigt auf v2.
 - Bugfix: Save-Guard `val_acc > best_val_acc` (Init 0) speicherte bei
   val_acc = 0.0 nie ein Checkpoint → Init jetzt −1.
 
@@ -168,8 +170,8 @@ SLURM-Skripte bereits gelöscht, dev hinkte hinterher):
 - `start.sh`, `start_mappo.sh`, `start_mobile.sh` (SLURM)
 - `tensorboard_parser.py` (Auswertung alter `logs_vtrace`-Runs)
 
-Aktive Pipeline danach: `main/full_league.py` (Training),
-`main/weckick_im.py` (BC-Warmstart), `videos/` (Rendering).
+Aktive Pipeline danach: `main/league.py`/`main/train.py` (Training),
+`BCWarmstart` in `main/agents.py` (BC-Warmstart), `videos/` (Rendering).
 
 ## 4. Bewusst nicht angefasst
 
@@ -201,8 +203,8 @@ Aktive Pipeline danach: `main/full_league.py` (Training),
 
 - **Stiller Start ohne Warmstart:** Existiert das `warmstart_path`-File
   nicht, startet der Learner kommentarlos from scratch (kein Fehler, keine
-  Warnung). Nach Netz-Umbauten daran denken, `weckick_im.py` neu laufen zu
-  lassen — durch den Import aus `full_league.py` (3.6) kann die Architektur
+  Warnung). Nach Netz-Umbauten daran denken, `BCWarmstart` in `agents.py` neu laufen zu
+  lassen — durch den Import aus `league.py`/`train.py` (3.6) kann die Architektur
   selbst aber nicht mehr auseinanderlaufen.
 - **Sparse Reward + schwacher BC-Start:** Ohne Checkpoint-Reward hängt der
   frühe Fortschritt an Expert-SIL/Golden-Memory. Wenn nach ~100 Updates die
