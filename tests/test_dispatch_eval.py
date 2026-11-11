@@ -59,6 +59,43 @@ class ReportAttribution(unittest.TestCase):
         self.assertEqual(sum(m.games_played for m in league.members.values()), 1)
 
 
+class SnapshotInUse(unittest.TestCase):
+    def league_with_snapshots(self, n):
+        league = make_league()
+        for i in range(n):
+            league.members[f"s{i}"] = fl.LeagueMember(name=f"s{i}", member_type="snapshot", rating=fl.TS_ENV.create_rating(mu=10.0 + i * 0.1), rating_update_factor=1.0, created_idx=i)
+        return league
+
+    def test_assigned_snapshot_survives_pruning_and_spacing(self):
+        league = self.league_with_snapshots(20)
+        d = fl.StickyDispatcher(league, [], eval_period=50)
+        d.assigned[0] = ("s0", None, "snapshot")
+        league.max_snapshots = 5
+        league._maybe_prune_snapshots()
+        self.assertIn("s0", league.members)
+        self.assertLess(len(league.members), 5 + 20)
+        league = self.league_with_snapshots(10)
+        d = fl.StickyDispatcher(league, [], eval_period=50)
+        d.assigned[0] = ("s0", None, "snapshot")
+        league._ensure_skill_spacing()
+        self.assertIn("s0", league.members)
+        self.assertNotIn("s1", league.members)
+
+    def test_unassigned_snapshot_is_pruned_after_game_moves_on(self):
+        league = self.league_with_snapshots(10)
+        d = fl.StickyDispatcher(league, [], eval_period=50)
+        d.assigned[0] = ("s0", None, "snapshot")
+        d.assigned[0] = ("bot_easy", None, "bot_easy")
+        league._ensure_skill_spacing()
+        self.assertNotIn("s0", league.members)
+
+    def test_game_for_removed_opponent_is_counted_as_dropped(self):
+        league = make_league()
+        league.report_game("gone", fl.TS_ENV.create_rating(), won=True)
+        self.assertEqual(league.dropped_games, 1)
+        self.assertEqual(league.total_games, 0)
+
+
 class ExpertGate(unittest.TestCase):
     def learner(self, hard_results, min_games=20, threshold=0.7):
         league = make_league()

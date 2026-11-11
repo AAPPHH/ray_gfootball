@@ -145,6 +145,8 @@ class PureLeague:
         self.total_games = 0
         self.policy_fingerprints: Dict[str, np.ndarray] = {}
         self._init_bots()
+        self.protected = lambda: set()
+        self.dropped_games = 0
 
     def _init_bots(self):
         for name, mu, sigma, env_name, controls_right in BOT_CONFIGS:
@@ -208,6 +210,8 @@ class PureLeague:
     def report_game(self, opponent_name: str, current_rating: trueskill.Rating, won: bool, drawn: bool = False) -> trueskill.Rating:
         if opponent_name not in self.members:
             return current_rating
+            self.dropped_games += 1
+            print(f"  game vs removed opponent {opponent_name} not counted ({self.dropped_games} dropped)")
         member = self.members[opponent_name]
         self.total_games += 1
         if drawn:
@@ -264,7 +268,7 @@ class PureLeague:
         if len(snapshots) < 3:
             return
         snapshots.sort(key=lambda x: x[1].conservative_skill, reverse=True)
-        keep = set()
+        keep = set(self.protected())
         if self.champion and self.members[self.champion].member_type == "snapshot":
             keep.add(self.champion)
         last_kept_skill = float('inf')
@@ -307,7 +311,7 @@ class PureLeague:
         snapshots = [m for m in self.members.values() if m.member_type == "snapshot"]
         if len(snapshots) < self.max_snapshots:
             return
-        keep = set()
+        keep = set(self.protected())
         if self.champion and self.members[self.champion].member_type == "snapshot":
             keep.add(self.champion)
         for m in sorted(snapshots, key=lambda m: m.conservative_skill, reverse=True)[:5]:
@@ -1026,6 +1030,10 @@ class StickyDispatcher:
             return (*current, None)
         self.cycle += 1
         slot = self.cycle % self.eval_period
+        league.protected = self.in_use
+
+    def in_use(self) -> set:
+        return {a[0] for a in self.assigned.values()}
         opponent, _ = self.league.select_opponent(rating, force_bot=self.eval_bots[slot] if slot < len(self.eval_bots) else None)
         weights = self.league.get_member_weights(opponent)
         self.assigned[wid] = (opponent, self.league.get_env_config(opponent), "snapshot" if weights else opponent)
