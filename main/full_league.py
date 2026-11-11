@@ -39,6 +39,13 @@ FEATURE_DIM, OBS_DIM, NUM_ACTIONS = 93, 115, 19
 trueskill.setup(backend='mpmath')
 TS_ENV = trueskill.TrueSkill(mu=25.0, sigma=8.333, beta=4.166, tau=0.083, draw_probability=0.05)
 
+def explained_variance(values: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor = None) -> float:
+    values, targets = values.reshape(-1), targets.reshape(-1)
+    if mask is not None:
+        values, targets = values[mask.reshape(-1).bool()], targets[mask.reshape(-1).bool()]
+    var = targets.double().var(unbiased=False)
+    return 1.0 - ((targets - values).double().var(unbiased=False) / var).item() if var > 1e-12 else 0.0
+
 @dataclass
 class LeagueMember:
     name: str
@@ -1065,6 +1072,7 @@ class LeagueLearner:
         with torch.no_grad():
             mean_rho = targets["avg_rho"]
             max_rho = targets["diag"]["is_ratio"].clamp(max=vcfg["rho_bar"])[m].max().item()
+            ev = explained_variance(values.detach().float(), targets["vtargets"], m)
         with autocast('cuda'):
             losses = impala_loss(targets, target_lp[m], entropy[m], values_norm[m], vcfg, mask=m)
         loss, policy_loss, value_loss = losses["loss"], losses["policy"], losses["value"]
@@ -1078,7 +1086,7 @@ class LeagueLearner:
         return {
             'loss': loss.item(), 'pi': policy_loss.item(), 'v': value_loss.item(),
             'ent': (entropy * mask).sum().item() / mask.sum().item(),
-            'rho': mean_rho, 'rho_max': max_rho, 'grad': grad_norm,
+            'rho': mean_rho, 'rho_max': max_rho, 'ev': ev, 'grad': grad_norm,
             'grad_clip': grad_clipped.item() if torch.is_tensor(grad_clipped) else grad_clipped
         }
 
@@ -1155,7 +1163,7 @@ class LeagueLearner:
         else:
             sil_str = "SIL:--"
         champ = league_stats['champion'] or "none"
-        print(f"[{self.updates:4d}] {self.total_steps/1e6:.1f}M {sps/1e3:.0f}k/s {mpm:.0f}m/min {elapsed/60:.0f}m | W/D/L:{win_rate:.0f}/{draw_rate:.0f}/{loss_rate:.0f}% R:{ret:+.1f}({ret_max:+.0f}) | μ={self.current_rating.mu:.1f} σ={self.current_rating.sigma:.2f} | {opp_str} N:{games_str} RvH:{avg_vs_hard:+.1f} | VT L:{stats['loss']:.2f} p:{stats['pi']:+.3f} v:{stats['v']:.2f} H:{stats['ent']:.2f} ρ:{stats['rho']:.1f}/{stats['rho_max']:.1f} | {exp_str} | {sil_str} | GM:{gm['size']}({gm['fresh']}) | ∇:{stats['grad']:.1f}→{stats['grad_clip']:.1f} | {league_stats['num_snapshots']}snap 🏆{champ}")
+        print(f"[{self.updates:4d}] {self.total_steps/1e6:.1f}M {sps/1e3:.0f}k/s {mpm:.0f}m/min {elapsed/60:.0f}m | W/D/L:{win_rate:.0f}/{draw_rate:.0f}/{loss_rate:.0f}% R:{ret:+.1f}({ret_max:+.0f}) | μ={self.current_rating.mu:.1f} σ={self.current_rating.sigma:.2f} | {opp_str} N:{games_str} RvH:{avg_vs_hard:+.1f} | VT L:{stats['loss']:.2f} p:{stats['pi']:+.3f} v:{stats['v']:.2f} H:{stats['ent']:.2f} ρ:{stats['rho']:.1f}/{stats['rho_max']:.1f} EV:{stats['ev']:.2f} | {exp_str} | {sil_str} | GM:{gm['size']}({gm['fresh']}) | ∇:{stats['grad']:.1f}→{stats['grad_clip']:.1f} | {league_stats['num_snapshots']}snap 🏆{champ}")
 
     def train(self, max_time: int = 3600):
         print(f"Training for {max_time}s...\n")

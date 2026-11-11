@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+import torch
 from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -92,6 +93,24 @@ class GameCounters(unittest.TestCase):
         self.assertEqual(stats["games_by_opp"]["bot_easy"], 1)
         self.assertEqual(stats["games_by_opp"]["random"], 0)
         self.assertEqual(stats["snap_games"], 0)
+
+
+class ExplainedVariance(unittest.TestCase):
+    def test_perfect_and_constant_predictions(self):
+        t = torch.randn(4, 50)
+        self.assertAlmostEqual(fl.explained_variance(t.clone(), t), 1.0, places=6)
+        self.assertAlmostEqual(fl.explained_variance(torch.full_like(t, t.mean().item()), t), 0.0, places=5)
+
+    def test_known_value_and_mask(self):
+        t = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        v = torch.tensor([[1.0, 2.0, 3.0, 100.0]])
+        mask = torch.tensor([[1, 1, 1, 0]])
+        self.assertAlmostEqual(fl.explained_variance(v, t, mask), 1.0, places=6)
+        v2 = t + torch.tensor([[1.0, -1.0, 1.0, -1.0]])
+        self.assertAlmostEqual(fl.explained_variance(v2, t), 1.0 - 1.0 / 1.25, places=6)
+
+    def test_zero_variance_targets(self):
+        self.assertEqual(fl.explained_variance(torch.zeros(3, 3), torch.ones(3, 3)), 0.0)
 
 
 if __name__ == "__main__":
