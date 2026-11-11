@@ -17,6 +17,23 @@ import ray
 import gfootball.env as football_env
 from impala_dreamer.impala import PopArtAdapter, impala_loss, impala_targets
 
+ROOT = Path(__file__).resolve().parent.parent
+CONFIG = {
+    "paths": {"warmstart": str(ROOT / "bc_warmstart_v2.pt"), "expert_parquet": str(ROOT / "main" / "expert.parquet"), "checkpoint_dir": "./checkpoints_league_v77"},
+    "ray": {"address": "auto", "worker": {"num_cpus": 1, "memory": 2 * 1024 ** 3}},
+    "vtrace": {"rho_bar": 1.0, "c_bar": 1.0, "log_rho_clip": 20.0, "adv_sigma_norm": False, "value_loss_form": "mse"},
+    "learner": dict(
+        num_workers=28, rollout_len=512, batch_size=64, lr=0.0001, gamma=0.999,
+        entropy_coeff=0.01, value_coeff=0.2, sil_coeff=0.5,
+        d_model=512, lstm_hidden=512,
+        max_snapshots=15, snapshot_on_rating_gain=2.0, snapshot_on_champion_wins=5,
+        bot_floor=0.25, latest_snapshot_prob=0.5, expert_threshold=0.7,
+        min_skill_spacing=3.0, min_policy_distance=0.02,
+        goal_traj_len=128, golden_capacity=2048, golden_max_uses=5,
+    ),
+    "train_seconds": 24 * 3600,
+}
+
 FEATURE_DIM, OBS_DIM, NUM_ACTIONS = 93, 115, 19
 trueskill.setup(backend='mpmath')
 TS_ENV = trueskill.TrueSkill(mu=25.0, sigma=8.333, beta=4.166, tau=0.083, draw_probability=0.05)
@@ -545,8 +562,6 @@ class Net(nn.Module):
         actions = logits.argmax(dim=-1) if deterministic else dist.sample()
         return actions, dist.log_prob(actions), self.value.denormalize(values_norm), hidden
 
-VTRACE_CFG = {"rho_bar": 1.0, "c_bar": 1.0, "log_rho_clip": 20.0, "adv_sigma_norm": False, "value_loss_form": "mse"}
-
 @ray.remote(num_cpus=1)
 class SelfPlayWorker:
     def __init__(self, wid: int, d_model: int, lstm_hidden: int, rollout_len: int = 512, goal_traj_len: int = 128):
@@ -969,8 +984,8 @@ class LeagueLearner:
                 torch.save({'model': self.model.state_dict()}, snap_path)
             if "warmstart" not in self.league.members:
                 self.league.add_snapshot("warmstart", str(snap_path), self._weights(), TS_ENV.create_rating(mu=25.0, sigma=8.0))
-        ray.init(ignore_reinit_error=True, num_cpus=num_workers + 4)
-        self.workers = [SelfPlayWorker.remote(i, d_model, lstm_hidden, rollout_len, goal_traj_len) for i in range(num_workers)]
+        ray.init(address=CONFIG["ray"]["address"], ignore_reinit_error=True)
+        self.workers = [SelfPlayWorker.options(**CONFIG["ray"]["worker"]).remote(i, d_model, lstm_hidden, rollout_len, goal_traj_len) for i in range(num_workers)]
         self.total_steps = 0
         self.total_matches = 0
         self.updates = 0
@@ -1045,7 +1060,7 @@ class LeagueLearner:
             entropy = dist.entropy()
             values = self.model.value.denormalize(values_norm)
         m = mask.bool()
-        vcfg = {**VTRACE_CFG, "gamma": self.gamma, "alpha": self.entropy_coeff, "value_coef": self.value_coeff}
+        vcfg = {**CONFIG["vtrace"], "gamma": self.gamma, "alpha": self.entropy_coeff, "value_coef": self.value_coeff}
         targets = impala_targets(beh_lp, target_lp.detach(), rew, values.detach(), done, bootstrap.float(), PopArtAdapter(self.model.value), vcfg, mask=m)
         with torch.no_grad():
             mean_rho = targets["avg_rho"]
@@ -1238,24 +1253,16 @@ class LeagueLearner:
             try:
                 ray.get(w.close.remote(), timeout=2)
             except:
-                pass 
-        ray.shutdown()
+                pass
+            ray.kill(w)
 
 if __name__ == "__main__":
     learner = LeagueLearner(
-        num_workers=28, rollout_len=512, batch_size=64, lr=0.0001, gamma=0.999,
-        entropy_coeff=0.01, value_coeff=0.2, sil_coeff=0.5,
-        d_model=512, lstm_hidden=512,
-        checkpoint_dir="./checkpoints_league_v77",
-        warmstart_path=r"C:\clones\rlib_gfootball\bc_warmstart_v2.pt",
-        expert_parquet=r"C:\clones\rlib_gfootball\main\expert.parquet",
-        max_snapshots=15, snapshot_on_rating_gain=2.0, snapshot_on_champion_wins=5,
-        bot_floor=0.25, latest_snapshot_prob=0.5, expert_threshold=0.7,
-        min_skill_spacing=3.0, min_policy_distance=0.02,
-        goal_traj_len=128, golden_capacity=2048, golden_max_uses=5,
+        checkpoint_dir=CONFIG["paths"]["checkpoint_dir"], warmstart_path=CONFIG["paths"]["warmstart"],
+        expert_parquet=CONFIG["paths"]["expert_parquet"], **CONFIG["learner"],
     )
     try:
-        learner.train(max_time=24*3600)
+        learner.train(max_time=CONFIG["train_seconds"])
     except KeyboardInterrupt:
         print("\nStopped!")
     finally:

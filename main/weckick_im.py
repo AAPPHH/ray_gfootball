@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from full_league import Net, FeatureEngineer, OBS_DIM, FEATURE_DIM, NUM_ACTIONS
+from full_league import CONFIG, Net, FeatureEngineer, OBS_DIM, FEATURE_DIM, NUM_ACTIONS
 
 
 class ExpertDataset(Dataset):
@@ -107,6 +107,6 @@ def train_bc(parquet_path, epochs=20, batch_size=512, lr=1e-3, save_path="bc_war
 
 
 if __name__ == "__main__":
-    parquet_path = sys.argv[1] if len(sys.argv) > 1 else r"C:\clones\rlib_gfootball\main\expert.parquet"
-    save_path = sys.argv[2] if len(sys.argv) > 2 else r"C:\clones\rlib_gfootball\bc_warmstart_v2.pt"
+    parquet_path = sys.argv[1] if len(sys.argv) > 1 else CONFIG["paths"]["expert_parquet"]
+    save_path = sys.argv[2] if len(sys.argv) > 2 else CONFIG["paths"]["warmstart"]
     train_bc(parquet_path, epochs=20, batch_size=512, lr=1e-3, save_path=save_path)
