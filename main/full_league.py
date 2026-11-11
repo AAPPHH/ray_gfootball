@@ -28,7 +28,7 @@ CONFIG = {
         entropy_coeff=0.01, value_coeff=0.2, sil_coeff=0.5,
         d_model=512, lstm_hidden=512,
         max_snapshots=15, snapshot_on_rating_gain=2.0, snapshot_on_champion_wins=5,
-        bot_floor=0.25, latest_snapshot_prob=0.5, expert_threshold=0.7,
+        bot_floor=0.25, latest_snapshot_prob=0.5, expert_threshold=0.7, expert_min_games=20,
         min_skill_spacing=3.0, min_policy_distance=0.02,
         goal_traj_len=128, golden_capacity=2048, golden_max_uses=5,
     ),
@@ -68,6 +68,9 @@ class LeagueMember:
     @property
     def recent_loss_rate(self) -> float:
         return 1.0 - self.recent_win_rate - self.recent_draw_rate
+    @property
+    def agent_win_rate(self) -> float:
+        return 1.0 - self.recent_win_rate - self.recent_draw_rate if self.recent_wins else 0.0
     @property
     def conservative_skill(self) -> float:
         return self.rating.mu - 3 * self.rating.sigma
@@ -323,7 +326,7 @@ class PureLeague:
             'total_games': self.total_games, 'champion': self.champion,
             'champion_mu': self.members[self.champion].rating.mu if self.champion else 0,
             'num_snapshots': len(snaps), 'wins_vs_champion': self.wins_vs_champion, 'diversity': diversity,
-            'bots': {n: {'mu': m.rating.mu, 'games': m.games_played, 'wr': 1 - m.recent_win_rate - m.recent_draw_rate,
+            'bots': {n: {'mu': m.rating.mu, 'games': m.games_played, 'wr': m.agent_win_rate,
                          'dr': m.recent_draw_rate, 'lr': m.recent_win_rate} for n, m in bots.items()}
         }
 
@@ -941,7 +944,7 @@ class LeagueLearner:
                  d_model: int = 512, lstm_hidden: int = 512, checkpoint_dir: str = "./checkpoints_league",
                  warmstart_path: str = None, expert_parquet: str = None, max_snapshots: int = 15,
                  snapshot_on_rating_gain: float = 2.0, snapshot_on_champion_wins: int = 5,
-                 bot_floor: float = 0.25, latest_snapshot_prob: float = 0.5, expert_threshold: float = 0.7,
+                 bot_floor: float = 0.25, latest_snapshot_prob: float = 0.5, expert_threshold: float = 0.7, expert_min_games: int = 20,
                  min_skill_spacing: float = 3.0,
                  min_policy_distance: float = 0.1, goal_traj_len: int = 128, golden_capacity: int = 2048,
                  golden_max_uses: int = 5):
@@ -955,6 +958,7 @@ class LeagueLearner:
         self.d_model = d_model
         self.lstm_hidden = lstm_hidden
         self.expert_threshold = expert_threshold
+        self.expert_min_games = expert_min_games
         self.expert_disabled = False
         self.goal_traj_len = goal_traj_len
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1111,6 +1115,16 @@ class LeagueLearner:
             torch.save({'model': self.model.state_dict()}, path)
             self.league.add_snapshot(name, str(path), current_weights, self.current_rating)
 
+    def expert_gate_closed(self) -> bool:
+        hard = self.league.members['bot_hard']
+        return hard.games_played >= self.expert_min_games and hard.agent_win_rate >= self.expert_threshold
+
+    @staticmethod
+    def _opp_col(tag: str, s: dict) -> str:
+        if not s.get('games'):
+            return f"{tag}:-(0)"
+        return f"{tag}:{s['wr']*100:.0f}/{s['dr']*100:.0f}/{s['lr']*100:.0f}({s['games']})"
+
     def _log_progress(self, stats: dict, stats_exp: dict = None, stats_sil: dict = None):
         elapsed = time.time() - self.start
         sps = self.total_steps / elapsed
@@ -1128,18 +1142,7 @@ class LeagueLearner:
         league_stats = self.league.get_stats()
         gm = self.golden.stats()
         bot_stats = league_stats['bots']
-        e_wr = bot_stats.get('bot_easy', {}).get('wr', 0) * 100
-        e_dr = bot_stats.get('bot_easy', {}).get('dr', 0) * 100
-        e_lr = bot_stats.get('bot_easy', {}).get('lr', 0) * 100
-        e_n = bot_stats.get('bot_easy', {}).get('games', 0)
-        m_wr = bot_stats.get('bot_medium', {}).get('wr', 0) * 100
-        m_dr = bot_stats.get('bot_medium', {}).get('dr', 0) * 100
-        m_lr = bot_stats.get('bot_medium', {}).get('lr', 0) * 100
-        m_n = bot_stats.get('bot_medium', {}).get('games', 0)
-        h_wr = bot_stats.get('bot_hard', {}).get('wr', 0) * 100
-        h_dr = bot_stats.get('bot_hard', {}).get('dr', 0) * 100
-        h_lr = bot_stats.get('bot_hard', {}).get('lr', 0) * 100
-        h_n = bot_stats.get('bot_hard', {}).get('games', 0)
+        opp_str = " ".join(self._opp_col(tag, bot_stats.get(name, {})) for tag, name in (("E", "bot_easy"), ("M", "bot_medium"), ("H", "bot_hard")))
         if stats_exp:
             exp_str = f"EXP L:{stats_exp['sil_loss']:.2f} p:{stats_exp['sil_pi']:.2f} v:{stats_exp['sil_v']:.2f} adv:{stats_exp['sil_adv']:.2f}({stats_exp['sil_frac']:.0%})"
         elif self.expert_disabled:
@@ -1151,7 +1154,7 @@ class LeagueLearner:
         else:
             sil_str = "SIL:--"
         champ = league_stats['champion'] or "none"
-        print(f"[{self.updates:4d}] {self.total_steps/1e6:.1f}M {sps/1e3:.0f}k/s {mpm:.0f}m/min {elapsed/60:.0f}m | W/D/L:{win_rate:.0f}/{draw_rate:.0f}/{loss_rate:.0f}% R:{ret:+.1f}({ret_max:+.0f}) | μ={self.current_rating.mu:.1f} σ={self.current_rating.sigma:.2f} | E:{e_wr:.0f}/{e_dr:.0f}/{e_lr:.0f}({e_n}) M:{m_wr:.0f}/{m_dr:.0f}/{m_lr:.0f}({m_n}) H:{h_wr:.0f}/{h_dr:.0f}/{h_lr:.0f}({h_n}) RvH:{avg_vs_hard:+.1f} | VT L:{stats['loss']:.2f} p:{stats['pi']:+.3f} v:{stats['v']:.2f} H:{stats['ent']:.2f} ρ:{stats['rho']:.1f}/{stats['rho_max']:.1f} | {exp_str} | {sil_str} | GM:{gm['size']}({gm['fresh']}) | ∇:{stats['grad']:.1f}→{stats['grad_clip']:.1f} | {league_stats['num_snapshots']}snap 🏆{champ}")
+        print(f"[{self.updates:4d}] {self.total_steps/1e6:.1f}M {sps/1e3:.0f}k/s {mpm:.0f}m/min {elapsed/60:.0f}m | W/D/L:{win_rate:.0f}/{draw_rate:.0f}/{loss_rate:.0f}% R:{ret:+.1f}({ret_max:+.0f}) | μ={self.current_rating.mu:.1f} σ={self.current_rating.sigma:.2f} | {opp_str} RvH:{avg_vs_hard:+.1f} | VT L:{stats['loss']:.2f} p:{stats['pi']:+.3f} v:{stats['v']:.2f} H:{stats['ent']:.2f} ρ:{stats['rho']:.1f}/{stats['rho_max']:.1f} | {exp_str} | {sil_str} | GM:{gm['size']}({gm['fresh']}) | ∇:{stats['grad']:.1f}→{stats['grad_clip']:.1f} | {league_stats['num_snapshots']}snap 🏆{champ}")
 
     def train(self, max_time: int = 3600):
         print(f"Training for {max_time}s...\n")
@@ -1197,12 +1200,12 @@ class LeagueLearner:
             self.updates += 1
             stats_exp = None
             if self.expert and len(self.expert) >= self.batch_size // 2 and not self.expert_disabled:
-                h_wr = self.league.get_stats()['bots'].get('bot_hard', {}).get('wr', 0)
-                if h_wr < self.expert_threshold:
-                    stats_exp = self._update_sil_gpu(self.expert.sample(self.batch_size // 2))
-                else:
+                if self.expert_gate_closed():
                     self.expert_disabled = True
-                    print(f"  🎓 Expert disabled (H:{h_wr*100:.0f}%)")
+                    hard = self.league.members['bot_hard']
+                    print(f"  🎓 Expert disabled (H:{hard.agent_win_rate*100:.0f}% n={hard.games_played})")
+                else:
+                    stats_exp = self._update_sil_gpu(self.expert.sample(self.batch_size // 2))
             stats_sil = None
             if len(self.golden) >= self.batch_size // 4:
                 golden_batch = self.golden.sample(min(self.batch_size // 2, len(self.golden)))

@@ -57,5 +57,30 @@ class ReportAttribution(unittest.TestCase):
         self.assertEqual(sum(m.games_played for m in league.members.values()), 1)
 
 
+class ExpertGate(unittest.TestCase):
+    def learner(self, hard_results, min_games=20, threshold=0.7):
+        league = make_league()
+        for won in hard_results:
+            league.report_game("bot_hard", fl.TS_ENV.create_rating(), won=won)
+        gate = fl.LeagueLearner.__new__(fl.LeagueLearner)
+        gate.league, gate.expert_min_games, gate.expert_threshold = league, min_games, threshold
+        return gate
+
+    def test_empty_history_is_not_a_win_rate(self):
+        league = make_league()
+        stats = league.get_stats()["bots"]["bot_hard"]
+        self.assertEqual((stats["games"], stats["wr"], stats["dr"], stats["lr"]), (0, 0.0, 0.0, 0.0))
+        self.assertEqual(fl.LeagueLearner._opp_col("H", stats), "H:-(0)")
+
+    def test_gate_stays_open_below_min_games(self):
+        self.assertFalse(self.learner([True] * 19).expert_gate_closed())
+
+    def test_gate_closes_after_min_games_with_high_win_rate(self):
+        self.assertTrue(self.learner([True] * 20).expert_gate_closed())
+
+    def test_gate_stays_open_with_low_win_rate(self):
+        self.assertFalse(self.learner([False] * 30).expert_gate_closed())
+
+
 if __name__ == "__main__":
     unittest.main()
