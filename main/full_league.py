@@ -817,8 +817,9 @@ Evaluator = ray.remote(EvalCore)
 class EvalRunner:
     def __init__(self, cfg: dict, d_model: int, lstm_hidden: int, rollout_len: int, out_path: Path):
         self.cfg, self.out_path = cfg, Path(out_path)
-        self.actors = {bot: Evaluator.options(**cfg["actor"]).remote(d_model, lstm_hidden, rollout_len, cfg["torch_threads"]) for bot in cfg["bots"]} if cfg["every"] > 0 else {}
-        self.refs, self.results, self.meta = {}, {}, None
+        self.make = lambda: Evaluator.options(**cfg["actor"]).remote(d_model, lstm_hidden, rollout_len, cfg["torch_threads"])
+        self.actors = {bot: self.make() for bot in cfg["bots"]} if cfg["every"] > 0 else {}
+        self.refs, self.results, self.errors, self.meta = {}, {}, {}, None
         self.last = {}
 
     def due(self, updates: int) -> bool:
@@ -827,7 +828,7 @@ class EvalRunner:
     def start(self, updates: int, steps: int, weights: dict):
         shared = ray.put(weights)
         self.refs = {actor.evaluate.remote(shared, bot, self.cfg["games"]): bot for bot, actor in self.actors.items()}
-        self.results, self.meta = {}, {"update": updates, "steps": steps, "start": time.time()}
+        self.results, self.errors, self.meta = {}, {}, {"update": updates, "steps": steps, "start": time.time()}
 
     def poll(self):
         if not self.refs:
@@ -839,13 +840,13 @@ class EvalRunner:
                 self.results[bot] = summarize_games(ray.get(ref))
             except Exception as e:
                 print(f"  eval {bot} failed: {type(e).__name__}")
-                self.refs.clear()
-                return None
+                self.replace(bot)
         if self.refs:
             return None
         meta = dict(self.meta)
         wall = round(time.time() - meta.pop("start"), 1)
-        record = {**meta, "wall_s": wall, "bots": self.results}
+        record = {**meta, "wall_s": wall, "bots": self.results, "errors": self.errors, "n_errors": len(self.errors)}
+                self.errors[bot] = type(e).__name__
         with open(self.out_path, "a") as f:
             f.write(json.dumps(record) + "\n")
         self.last = record
@@ -860,6 +861,13 @@ class ExpertBufferGPU:
     def __init__(self, parquet_path: str, device: torch.device, window_len: int = 512):
         self.device = device
         self.window_len = window_len
+    def replace(self, bot: str):
+        try:
+            ray.kill(self.actors[bot])
+        except Exception:
+            pass
+        self.actors[bot] = self.make()
+
         self.num_episodes = 0
         self.episode_slices = []
         self.window_slices = []

@@ -136,7 +136,7 @@ class WilsonCI(unittest.TestCase):
 
 class FakeRay:
     def __init__(self):
-        self.ready = set()
+        self.ready, self.killed = set(), []
 
     def put(self, x):
         return x
@@ -155,7 +155,7 @@ class FakeRef:
 
 class FakeActor:
     def __init__(self, key):
-        self.key = key
+        self.key, self.broken = key, set()
         self.evaluate = self
 
     def remote(self, weights, bot, games):
@@ -171,7 +171,7 @@ class EvalRunnerFlow(unittest.TestCase):
             r = fl.EvalRunner.__new__(fl.EvalRunner)
             r.cfg, r.out_path = {"every": 50, "games": 4, "bots": ["bot_easy", "bot_hard"]}, out
             r.actors = {"bot_easy": FakeActor("a"), "bot_hard": FakeActor("b")}
-            r.refs, r.results, r.meta, r.last = {}, {}, None, {}
+            r.refs, r.results, r.errors, r.meta, r.last = {}, {}, {}, None, {}
             self.assertFalse(r.due(49))
             self.assertTrue(r.due(50))
             r.start(50, 1000, {})
@@ -182,8 +182,13 @@ class EvalRunnerFlow(unittest.TestCase):
             self.assertFalse(out.exists())
             fake.ready.add("b")
             rec = r.poll()
+        if ref.episodes is None:
+            raise RuntimeError("actor died")
             self.assertEqual(rec["update"], 50)
             self.assertEqual(rec["bots"]["bot_hard"]["n"], 4)
+    def kill(self, actor):
+        self.killed.append(actor.key)
+
             self.assertEqual(json.loads(out.read_text())["bots"]["bot_easy"]["win"], 4)
             self.assertTrue(r.due(100))
         finally:
@@ -192,3 +197,33 @@ class EvalRunnerFlow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+        if self.key in self.broken:
+            return FakeRef(self.key, None)
+            self.assertEqual(rec["errors"], {})
+        finally:
+            fl.ray = old
+
+    def test_failing_bot_keeps_other_results_and_actor_is_recreated(self):
+        fake, old = FakeRay(), fl.ray
+        fl.ray = fake
+        try:
+            out = Path(tempfile.mkdtemp()) / "eval.jsonl"
+            r = fl.EvalRunner.__new__(fl.EvalRunner)
+            r.cfg, r.out_path = {"every": 50, "games": 4, "bots": ["bot_easy", "bot_hard"]}, out
+            bad, spare = FakeActor("b"), FakeActor("c")
+            bad.broken.add("b")
+            r.actors = {"bot_easy": FakeActor("a"), "bot_hard": bad}
+            r.make = lambda: spare
+            r.refs, r.results, r.errors, r.meta, r.last = {}, {}, {}, None, {}
+            r.start(50, 1000, {})
+            fake.ready.update(["a", "b"])
+            rec = r.poll()
+            self.assertEqual(rec["errors"], {"bot_hard": "RuntimeError"})
+            self.assertEqual(rec["n_errors"], 1)
+            self.assertEqual(rec["bots"]["bot_easy"]["n"], 4)
+            self.assertNotIn("bot_hard", rec["bots"])
+            self.assertIs(r.actors["bot_hard"], spare)
+            self.assertEqual(fake.killed, ["b"])
+            self.assertEqual(json.loads(out.read_text())["n_errors"], 1)
+            self.assertFalse(r.refs)
+            self.assertTrue(r.due(100))
