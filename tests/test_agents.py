@@ -117,6 +117,34 @@ class Interface(unittest.TestCase):
             tr.ray, lg.ray, tr.SelfPlayWorker = old
 
 
+class TryConfig(unittest.TestCase):
+    def test_cpu_try_replay_is_small_and_needs_at_most_eight_cpus(self):
+        cfg = tr.deep_merge(copy.deepcopy(tr.CONFIG), copy.deepcopy(tr.CPU_TRY))
+        self.assertLessEqual(cfg["learner"]["num_workers"] * cfg["ray"]["worker"]["num_cpus"] + cfg["learner"]["driver_threads"], 8)
+        self.assertEqual(cfg["ray"]["worker"]["num_gpus"], 0)
+        self.assertTrue(cfg["paths"]["checkpoint_dir"].startswith(tr.GF_RUNS))
+        agent = ag.make_agent(tr.agent_spec(cfg), learner=True)
+        self.assertLessEqual(sum(a.nbytes for a in agent.replay.data.values()), 200 * 1024 ** 2)
+
+    def test_free_cpu_check_blocks_a_start_on_a_busy_cluster(self):
+        class Busy:
+            def __init__(self, cpus):
+                self.cpus = cpus
+
+            def available_resources(self):
+                return {"CPU": self.cpus}
+        old = tr.ray
+        try:
+            cfg = small_cfg("dreamer")
+            cfg["min_free_cpus"] = 8
+            tr.ray = Busy(7)
+            self.assertIn("7 available, 8 needed", tr.free_cpu_error(cfg))
+            tr.ray = Busy(8)
+            self.assertIsNone(tr.free_cpu_error(cfg))
+        finally:
+            tr.ray = old
+
+
 class Rollouts(unittest.TestCase):
     def test_worker_rollout_with_each_agent(self):
         for kind in KINDS:

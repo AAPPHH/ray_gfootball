@@ -14,10 +14,12 @@ from league import TS_ENV, EvalRunner, PureLeague, SelfPlayWorker, StickyDispatc
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 GIB = 1024 ** 3
+GF_RUNS = "/tmp/claude-1005/-home-john-tinywhoop-bc-racing/a3574b03-9a09-436a-8c5e-cf180ed5b823/scratchpad/gf_runs"
 CONFIG = {
     "agent": "impala",
     "mode": "train",
     "paths": {"warmstart": str(ROOT / "bc_warmstart_v2.pt"), "expert_parquet": str(HERE / "expert.parquet"), "checkpoint_dir": "./checkpoints_league_v77"},
+    "min_free_cpus": 8,
     "ray": {"address": "auto", "namespace": None, "worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}, "env_vars": {"OMP_NUM_THREADS": "1"}},
     "learner": dict(
         num_workers=28, rollout_len=512, batch_size=64, goal_traj_len=128, driver_threads=4,
@@ -56,6 +58,17 @@ CONFIG = {
 }
 
 
+CPU_TRY = {
+    "agent": "dreamer", "train_seconds": 1800, "min_free_cpus": 8,
+    "paths": {"checkpoint_dir": GF_RUNS, "warmstart": None, "expert_parquet": None},
+    "ray": {"worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}, "env_vars": {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}},
+    "learner": {"num_workers": 6, "rollout_len": 512, "batch_size": 6, "goal_traj_len": 64, "driver_threads": 2},
+    "dreamer": {"device": "cpu", "replay_cap": 150_000, "prefill": 6000, "train_ratio": 16, "max_updates": None,
+                "model": {"deter": 128, "hidden": 128, "units": 128}},
+    "eval": {"every": 0}, "log_every": 5, "checkpoint_every": 25,
+}
+
+
 def deep_merge(base: dict, over: dict) -> dict:
     for k, v in over.items():
         base[k] = deep_merge(base[k], v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v
@@ -75,6 +88,12 @@ def ray_init(cfg: dict):
     ray.init(address=r["address"], namespace=r["namespace"], ignore_reinit_error=True, logging_level="WARNING",
              runtime_env={"py_modules": [str(Path(actor_critic.__file__).resolve().parent)], "working_dir": str(HERE),
                           "excludes": ["__pycache__", "*.pt", "*.parquet"], "env_vars": r["env_vars"]})
+
+
+def free_cpu_error(cfg: dict):
+    need = max(cfg["min_free_cpus"], cfg["learner"]["num_workers"] * cfg["ray"]["worker"]["num_cpus"])
+    free = ray.available_resources().get("CPU", 0)
+    return f"insufficient CPU on the shared Ray cluster: {free} available, {need} needed; not started" if free < need else None
 
 
 class LeagueTrainer:
@@ -242,6 +261,10 @@ def run(overrides: dict = None):
         BCWarmstart(agent_spec({**cfg, "agent": "impala"}), cfg["paths"]["expert_parquet"], cfg["paths"]["warmstart"], **cfg["bc"]).run()
         return
     ray_init(cfg)
+    error = free_cpu_error(cfg)
+    if error:
+        ray.shutdown()
+        raise SystemExit(error)
     trainer = LeagueTrainer(cfg)
     try:
         trainer.train(max_time=cfg["train_seconds"])

@@ -22,7 +22,7 @@ CONFIG = {
     "call_timeout_s": 300,
     "poll_s": 5,
     "min_free_cpus": 8,
-    "out_dir": str(HERE.parent / "smoke_out"),
+    "out_dir": None,
     "overrides": {
         "ray": {"address": "auto", "worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * 1024 ** 3}, "env_vars": {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}},
         "learner": {"num_workers": 4, "rollout_len": 512, "batch_size": 4, "goal_traj_len": 64, "driver_threads": 4},
@@ -86,8 +86,9 @@ def run():
     import league
     import train
     cfg = train.deep_merge(copy.deepcopy(train.CONFIG), {**copy.deepcopy(CONFIG["overrides"]), "agent": CONFIG["agent"]})
-    cfg["paths"]["checkpoint_dir"] = str(Path(CONFIG["out_dir"]) / "checkpoints")
-    out = Path(CONFIG["out_dir"])
+    out = Path(CONFIG["out_dir"] or Path(train.GF_RUNS) / cfg["agent"] / "smoke")
+    cfg["paths"]["checkpoint_dir"] = str(out / "checkpoints")
+    cfg["min_free_cpus"] = CONFIG["min_free_cpus"]
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     state = {"done": 0, "finite": True, "last": None, "sil_calls": 0, "model_updates": 0.0}
@@ -97,11 +98,10 @@ def run():
     t0 = time.time()
     train.ray_init(cfg)
     trainer = None
-    need = max(CONFIG["min_free_cpus"], workers * cfg["ray"]["worker"]["num_cpus"])
-    free = ray.available_resources().get("CPU", 0)
-    if free < need:
+    error = train.free_cpu_error(cfg)
+    if error:
         ray.shutdown()
-        summary["error"] = f"insufficient CPU on the shared Ray cluster: {free} available, {need} needed; smoke not started"
+        summary["error"] = error
         print(json.dumps(summary))
         return 1
     bounded = BoundedRay(ray, CONFIG["call_timeout_s"], CONFIG["poll_s"], t0 + CONFIG["timeout_s"])
