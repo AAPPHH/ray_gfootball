@@ -325,7 +325,7 @@ class PureLeague:
         return {
             'total_games': self.total_games, 'champion': self.champion,
             'champion_mu': self.members[self.champion].rating.mu if self.champion else 0,
-            'num_snapshots': len(snaps), 'wins_vs_champion': self.wins_vs_champion, 'diversity': diversity,
+            'num_snapshots': len(snaps), 'games_by_opp': {n: m.games_played for n, m in bots.items()}, 'snap_games': sum(m.games_played for m in snaps.values()), 'wins_vs_champion': self.wins_vs_champion, 'diversity': diversity,
             'bots': {n: {'mu': m.rating.mu, 'games': m.games_played, 'wr': m.agent_win_rate,
                          'dr': m.recent_draw_rate, 'lr': m.recent_win_rate} for n, m in bots.items()}
         }
@@ -1142,6 +1142,7 @@ class LeagueLearner:
         league_stats = self.league.get_stats()
         gm = self.golden.stats()
         bot_stats = league_stats['bots']
+        games_str = "/".join(f"{n.replace('bot_', '')[0]}{g}" for n, g in league_stats['games_by_opp'].items()) + f"/s{league_stats['snap_games']}"
         opp_str = " ".join(self._opp_col(tag, bot_stats.get(name, {})) for tag, name in (("E", "bot_easy"), ("M", "bot_medium"), ("H", "bot_hard")))
         if stats_exp:
             exp_str = f"EXP L:{stats_exp['sil_loss']:.2f} p:{stats_exp['sil_pi']:.2f} v:{stats_exp['sil_v']:.2f} adv:{stats_exp['sil_adv']:.2f}({stats_exp['sil_frac']:.0%})"
@@ -1154,7 +1155,7 @@ class LeagueLearner:
         else:
             sil_str = "SIL:--"
         champ = league_stats['champion'] or "none"
-        print(f"[{self.updates:4d}] {self.total_steps/1e6:.1f}M {sps/1e3:.0f}k/s {mpm:.0f}m/min {elapsed/60:.0f}m | W/D/L:{win_rate:.0f}/{draw_rate:.0f}/{loss_rate:.0f}% R:{ret:+.1f}({ret_max:+.0f}) | μ={self.current_rating.mu:.1f} σ={self.current_rating.sigma:.2f} | {opp_str} RvH:{avg_vs_hard:+.1f} | VT L:{stats['loss']:.2f} p:{stats['pi']:+.3f} v:{stats['v']:.2f} H:{stats['ent']:.2f} ρ:{stats['rho']:.1f}/{stats['rho_max']:.1f} | {exp_str} | {sil_str} | GM:{gm['size']}({gm['fresh']}) | ∇:{stats['grad']:.1f}→{stats['grad_clip']:.1f} | {league_stats['num_snapshots']}snap 🏆{champ}")
+        print(f"[{self.updates:4d}] {self.total_steps/1e6:.1f}M {sps/1e3:.0f}k/s {mpm:.0f}m/min {elapsed/60:.0f}m | W/D/L:{win_rate:.0f}/{draw_rate:.0f}/{loss_rate:.0f}% R:{ret:+.1f}({ret_max:+.0f}) | μ={self.current_rating.mu:.1f} σ={self.current_rating.sigma:.2f} | {opp_str} N:{games_str} RvH:{avg_vs_hard:+.1f} | VT L:{stats['loss']:.2f} p:{stats['pi']:+.3f} v:{stats['v']:.2f} H:{stats['ent']:.2f} ρ:{stats['rho']:.1f}/{stats['rho_max']:.1f} | {exp_str} | {sil_str} | GM:{gm['size']}({gm['fresh']}) | ∇:{stats['grad']:.1f}→{stats['grad_clip']:.1f} | {league_stats['num_snapshots']}snap 🏆{champ}")
 
     def train(self, max_time: int = 3600):
         print(f"Training for {max_time}s...\n")

@@ -82,5 +82,17 @@ class ExpertGate(unittest.TestCase):
         self.assertFalse(self.learner([False] * 30).expert_gate_closed())
 
 
+class GameCounters(unittest.TestCase):
+    def test_finished_games_per_opponent(self):
+        league = make_league()
+        for name in ["bot_hard", "bot_hard", "bot_easy"]:
+            league.report_game(name, fl.TS_ENV.create_rating(), won=True)
+        stats = league.get_stats()
+        self.assertEqual(stats["games_by_opp"]["bot_hard"], 2)
+        self.assertEqual(stats["games_by_opp"]["bot_easy"], 1)
+        self.assertEqual(stats["games_by_opp"]["random"], 0)
+        self.assertEqual(stats["snap_games"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
