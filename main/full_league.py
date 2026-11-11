@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 import ray
 import gfootball.env as football_env
 from impala_dreamer.impala import PopArtAdapter, impala_loss, impala_targets
+from impala_dreamer.sil import GoldenMemory, sil_clipped_step, sil_mc_returns
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = {
@@ -853,13 +854,13 @@ class ExpertBufferGPU:
     def __len__(self):
         return len(self.window_slices)
 
-class GoldenMemoryGPU:
+class GoldenMemoryGPU(GoldenMemory):
+    KEYS = ('obs', 'feat', 'act', 'prev_act', 'rew', 'done', 'mask', 'lp')
+
     def __init__(self, capacity: int, max_uses: int, traj_len: int, device: torch.device):
-        self.capacity = capacity
-        self.max_uses = max_uses
+        super().__init__(capacity, max_uses)
         self.traj_len = traj_len
         self.device = device
-        self.size = 0
         self.obs = torch.zeros(capacity, traj_len, OBS_DIM, device=device)
         self.feat = torch.zeros(capacity, traj_len, FEATURE_DIM, device=device)
         self.act = torch.zeros(capacity, traj_len, dtype=torch.long, device=device)
@@ -868,68 +869,47 @@ class GoldenMemoryGPU:
         self.done = torch.ones(capacity, traj_len, device=device)
         self.mask = torch.zeros(capacity, traj_len, device=device)
         self.lp = torch.zeros(capacity, traj_len, device=device)
-        self.uses = torch.zeros(capacity, dtype=torch.long, device='cpu')
-        self.opp_ratings = torch.zeros(capacity, device='cpu')
-        self.lengths = torch.zeros(capacity, dtype=torch.long, device='cpu')
+
+    opp_ratings = property(lambda self: self.score)
+    lengths = property(lambda self: self.ep_lens)
+
+    def length(self, trajectory):
+        return min(trajectory['obs'].shape[0], self.traj_len)
+
+    def weights(self, score):
+        return 1.0 + score / 50.0
+
+    def _recycle(self, used):
+        return int(used[0])
+
+    def write(self, idx, trajectory):
+        n = self.length(trajectory)
+        for k in self.KEYS:
+            getattr(self, k)[idx].fill_(1.0 if k == 'done' else 0.0)
+        for k in ('obs', 'feat', 'act', 'prev_act', 'rew', 'done'):
+            getattr(self, k)[idx, :n] = torch.from_numpy(trajectory[k][:n].copy()).to(self.device)
+        self.mask[idx, :n] = 1.0
 
     def add(self, trajectory: dict, opp_rating: float = 25.0):
-        traj_len = min(trajectory['obs'].shape[0], self.traj_len)
-        if self.size >= self.capacity:
-            expired = (self.uses >= self.max_uses).nonzero(as_tuple=True)[0]
-            if len(expired) > 0:
-                idx = expired[0].item()
-            else:
-                idx = self.opp_ratings[:self.size].argmin().item()
-                if opp_rating <= self.opp_ratings[idx].item():
-                    return False
-        else:
-            idx = self.size
-            self.size += 1
-        self.obs[idx].zero_()
-        self.feat[idx].zero_()
-        self.act[idx].zero_()
-        self.prev_act[idx].zero_()
-        self.rew[idx].zero_()
-        self.done[idx].fill_(1.0)
-        self.mask[idx].zero_()
-        self.lp[idx].zero_()
-        self.obs[idx, :traj_len] = torch.from_numpy(trajectory['obs'][:traj_len].copy()).to(self.device)
-        self.feat[idx, :traj_len] = torch.from_numpy(trajectory['feat'][:traj_len].copy()).to(self.device)
-        self.act[idx, :traj_len] = torch.from_numpy(trajectory['act'][:traj_len].copy()).to(self.device)
-        self.prev_act[idx, :traj_len] = torch.from_numpy(trajectory['prev_act'][:traj_len].copy()).to(self.device)
-        self.rew[idx, :traj_len] = torch.from_numpy(trajectory['rew'][:traj_len].copy()).to(self.device)
-        self.done[idx, :traj_len] = torch.from_numpy(trajectory['done'][:traj_len].copy()).to(self.device)
-        self.mask[idx, :traj_len] = 1.0
-        self.uses[idx] = 0
-        self.opp_ratings[idx] = opp_rating
-        self.lengths[idx] = traj_len
-        return True
+        return super().add(trajectory, 0.0, opp_rating)
 
     def sample(self, n: int) -> dict:
-        if self.size == 0:
+        chosen = self.draw(n)
+        if len(chosen) == 0:
             return None
-        valid_idx = (self.uses[:self.size] < self.max_uses).nonzero(as_tuple=True)[0]
-        if len(valid_idx) == 0:
-            return None
-        n = min(n, len(valid_idx))
-        weights = 1.0 + self.opp_ratings[valid_idx] / 50.0
-        probs = (weights / weights.sum()).numpy()
-        chosen = np.random.choice(len(valid_idx), size=n, replace=False, p=probs)
-        idx = valid_idx[chosen]
-        for i in idx:
-            self.uses[i] += 1
+        idx = torch.as_tensor(chosen)
         return {
             'obs': self.obs[idx], 'feat': self.feat[idx], 'act': self.act[idx],
             'prev_act': self.prev_act[idx], 'rew': self.rew[idx], 'done': self.done[idx],
             'mask': self.mask[idx], 'lp': self.lp[idx],
-            'bootstrap': torch.zeros(n, device=self.device), 'max_len': self.traj_len
+            'bootstrap': torch.zeros(len(idx), device=self.device), 'max_len': self.traj_len
         }
 
     def stats(self):
         if self.size == 0:
             return {'size': 0, 'fresh': 0, 'avg_opp': 0}
-        fresh = (self.uses[:self.size] < self.max_uses).sum().item()
-        return {'size': self.size, 'fresh': fresh, 'avg_opp': self.opp_ratings[:self.size].mean().item()}
+        fresh = int(np.count_nonzero(self.uses[:self.size] < self.max_uses))
+        return {'size': self.size, 'fresh': fresh, 'avg_opp': torch.from_numpy(self.score[:self.size]).mean().item()}
 
     def __len__(self):
         return self.size
@@ -1092,11 +1072,7 @@ class LeagueLearner:
             target_lp = Categorical(logits=logits).log_prob(act)
             values = self.model.value.denormalize(values_norm)
         with torch.no_grad():
-            mc_returns = torch.zeros_like(rew)
-            running = bootstrap.clone()
-            for t in reversed(range(T)):
-                running = torch.where(done[:, t].bool(), rew[:, t], rew[:, t] + self.gamma * running)
-                mc_returns[:, t] = running
+            mc_returns = sil_mc_returns(rew, done, self.gamma, bootstrap)
             sil_adv = torch.clamp(mc_returns - values.detach(), min=0)
         sil_mask = (sil_adv > 0) & (mask > 0)
         if not sil_mask.any():
@@ -1105,12 +1081,7 @@ class LeagueLearner:
             sil_policy_loss = -(target_lp[sil_mask] * sil_adv[sil_mask]).mean()
             sil_value_loss = 0.5 * (sil_adv[sil_mask] ** 2).mean()
             sil_loss = self.sil_coeff * (sil_policy_loss + sil_value_loss)
-        self.optimizer.zero_grad()
-        self.scaler.scale(sil_loss).backward()
-        self.scaler.unscale_(self.optimizer)
-        nn.utils.clip_grad_norm_(self.model.parameters(), 40.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        sil_clipped_step(self.optimizer, self.scaler, sil_loss, self.model.parameters(), 40.0)
         return {
             'sil_loss': sil_loss.item(), 'sil_pi': sil_policy_loss.item(), 'sil_v': sil_value_loss.item(),
             'sil_adv': sil_adv[sil_mask].mean().item(), 'sil_frac': sil_mask.float().sum().item() / mask.sum().item()
