@@ -67,6 +67,7 @@ def make_trainer_class(state):
         def _update(self, rollouts):
             stats = super()._update(rollouts)
             state["done"] += 1
+            state["model_updates"] += stats.get("model_updates", 0.0)
             state["finite"] = state["finite"] and all(math.isfinite(float(v)) for v in stats.values())
             state["last"] = {k: float(v) for k, v in stats.items()}
             if state["done"] >= CONFIG["updates"]:
@@ -89,7 +90,7 @@ def run():
     out = Path(CONFIG["out_dir"])
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
-    state = {"done": 0, "finite": True, "last": None, "sil_calls": 0}
+    state = {"done": 0, "finite": True, "last": None, "sil_calls": 0, "model_updates": 0.0}
     workers = cfg["learner"]["num_workers"]
     torch.set_num_threads(cfg["learner"]["driver_threads"])
     summary = {"agent": cfg["agent"], "updates_requested": CONFIG["updates"], "workers": workers, "ok": False, "error": None}
@@ -117,7 +118,7 @@ def run():
             trainer.train(max_time=CONFIG["timeout_s"])
         except SmokeDone:
             pass
-        summary["ok"] = state["done"] >= CONFIG["updates"] and state["finite"] and state["last"] is not None
+        summary["ok"] = state["done"] >= CONFIG["updates"] and state["finite"] and state["last"] is not None and (cfg["agent"] != "dreamer" or state["model_updates"] > 0)
     except Exception as e:
         summary["error"] = f"{type(e).__name__}: {e}"
     finally:
@@ -127,7 +128,7 @@ def run():
                                  "EMH": {tag: stats["bots"][name]["games"] for tag, name in (("E", "bot_easy"), ("M", "bot_medium"), ("H", "bot_hard"))}}
             trainer.close()
         ray.shutdown()
-    summary.update({"updates_done": state["done"], "total_steps": trainer.total_steps if trainer else 0, "losses_finite": state["finite"], "sil_path_ran": state["sil_calls"] > 0, "sil_calls": state["sil_calls"], "last_stats": state["last"], "wall_s": round(time.time() - t0, 1)})
+    summary.update({"updates_done": state["done"], "total_steps": trainer.total_steps if trainer else 0, "losses_finite": state["finite"], "sil_path_ran": state["sil_calls"] > 0, "sil_calls": state["sil_calls"], "model_updates": state["model_updates"], "last_stats": state["last"], "wall_s": round(time.time() - t0, 1)})
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary))
     return 0 if summary["ok"] else 1

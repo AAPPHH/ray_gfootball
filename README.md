@@ -206,3 +206,8 @@ MIT License - see [LICENSE](LICENSE) for details.
 ---
 
 **Total Domination Achieved.** 🏆
+## Modular agents (dev-modular)
+
+`main/` is split by theme: `football_env.py` (env, bots, features, reward events), `league.py` (TrueSkill league, workers, evaluator, dispatcher), `agents.py` (common `Agent` interface, `ImpalaAgent`, `DreamerAgent`, BC warmstart), `train.py` (one `CONFIG`, `CONFIG["agent"]` = `"impala"` or `"dreamer"`), `smoke.py` (short run of either agent).
+
+Overrides without argparse are a JSON dict: `python main/train.py '{"agent": "dreamer"}'`. BC warmstart: `'{"mode": "bc"}'`. Tests: `python -m unittest discover -s tests`.
