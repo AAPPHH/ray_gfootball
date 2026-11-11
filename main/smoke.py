@@ -13,7 +13,8 @@ sys.path.insert(0, str(HERE))
 CONFIG = {
     "updates": 200,
     "timeout_s": 3600,
-    "first_get_timeout_s": 300,
+    "call_timeout_s": 300,
+    "poll_s": 5,
     "driver_threads": 8,
     "out_dir": str(HERE.parent / "smoke_out"),
     "ray": {"address": "auto", "namespace": None, "worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * 1024 ** 3}},
@@ -27,28 +28,26 @@ class SmokeDone(Exception):
     pass
 
 
-class FirstCallTimeout:
-    def __init__(self, ray, timeout, state):
-        self._ray, self._timeout, self._state = ray, timeout, state
+class BoundedRay:
+    def __init__(self, ray, call_timeout, poll, deadline):
+        self._ray, self._call_timeout, self._poll, self._deadline = ray, call_timeout, poll, deadline
 
     def __getattr__(self, name):
         return getattr(self._ray, name)
 
     def get(self, refs, timeout=None):
-        if timeout is None and not self._state["first_get"]:
-            timeout = self._timeout
-        out = self._ray.get(refs, timeout=timeout)
-        self._state["first_get"] = True
-        return out
+        return self._ray.get(refs, timeout=self._call_timeout if timeout is None else timeout)
 
     def wait(self, refs, **kw):
-        if not self._state["first_wait"]:
-            kw.setdefault("timeout", self._timeout)
-        ready, rest = self._ray.wait(refs, **kw)
-        if not self._state["first_wait"] and not ready:
-            raise TimeoutError(f"no rollout within {self._timeout}s")
-        self._state["first_wait"] = True
-        return ready, rest
+        if kw.get("timeout") is not None:
+            return self._ray.wait(refs, **kw)
+        stall = time.time() + self._call_timeout
+        while True:
+            ready, rest = self._ray.wait(refs, **{**kw, "timeout": self._poll})
+            if ready:
+                return ready, rest
+            if time.time() > min(stall, self._deadline):
+                raise TimeoutError(f"no rollout within {self._call_timeout}s or past the {CONFIG['timeout_s']}s limit")
 
 
 def make_learner_class(fl, state):
@@ -76,7 +75,7 @@ def run():
     import full_league as fl
     out = Path(CONFIG["out_dir"])
     out.mkdir(parents=True, exist_ok=True)
-    state = {"done": 0, "finite": True, "last": None, "sil_calls": 0, "first_get": False, "first_wait": False}
+    state = {"done": 0, "finite": True, "last": None, "sil_calls": 0}
     torch.set_num_threads(CONFIG["driver_threads"])
     summary = {"updates_requested": CONFIG["updates"], "workers": CONFIG["learner"]["num_workers"], "ok": False, "error": None}
     t0 = time.time()
@@ -92,14 +91,14 @@ def run():
         summary["error"] = f"insufficient CPU on the shared Ray cluster: {free} available, {need} needed; smoke not started"
         print(json.dumps(summary))
         return 1
-    fl.ray = FirstCallTimeout(ray, CONFIG["first_get_timeout_s"], state)
+    fl.ray = BoundedRay(ray, CONFIG["call_timeout_s"], CONFIG["poll_s"], t0 + CONFIG["timeout_s"])
     try:
         learner = make_learner_class(fl, state)(checkpoint_dir=str(out / "checkpoints"), warmstart_path=CONFIG["warmstart"], expert_parquet=CONFIG["expert_parquet"], **{**fl.CONFIG["learner"], **CONFIG["learner"]})
         try:
             learner.train(max_time=CONFIG["timeout_s"])
         except SmokeDone:
             pass
-        summary["ok"] = state["done"] >= CONFIG["updates"] and state["finite"]
+        summary["ok"] = state["done"] >= CONFIG["updates"] and state["finite"] and state["last"] is not None
     except Exception as e:
         summary["error"] = f"{type(e).__name__}: {e}"
     finally:
