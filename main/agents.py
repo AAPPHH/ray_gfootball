@@ -1,3 +1,4 @@
+import math
 import time
 from pathlib import Path
 from typing import Optional
@@ -502,7 +503,7 @@ class DreamerAgent(Agent):
         workers = spec["num_workers"]
         self.replay = Replay(workers, max(spec["replay_cap"] // workers, spec["T"] + 1), {"obs": self.O, "priv": 1, "act": self.A, "rew": 1, "first": 1, "term": 1})
         self.rng = np.random.default_rng(spec["seed"])
-        self.carry, self.env_steps, self.credit, self.updates, self.last = np.zeros(workers), 0, 0.0, 0, {}
+        self.carry, self.env_steps, self.credit, self.updates, self.last, self.credited_steps = np.zeros(workers), 0, 0.0, 0, {}, 0
 
     def policy_state(self):
         return {k: v for k, v in self.model.state_dict().items() if k.split(".")[0] in DREAMER_POLICY_KEYS}
@@ -542,24 +543,27 @@ class DreamerAgent(Agent):
                 rew_in = 0.0
         self.carry[e] = rew_in
         self.env_steps += n
-        self.credit += n * self.spec["train_ratio"] if self.env_steps >= self.spec["prefill"] else 0.0
+        if self.env_steps >= self.spec["prefill"]:
+            self.credit += n * self.spec["train_ratio"]
+            self.credited_steps += n
 
     def update(self, rollouts: list) -> dict:
         bt = self.spec["batch"] * self.spec["T"]
+        cap = self.spec["max_updates"] or 2 * math.ceil(sum(len(r['act']) for r in rollouts) * self.spec["train_ratio"] / bt)
         done_updates = 0
-        while self.credit >= bt and self.replay.ready(self.spec["T"]) and done_updates < self.spec["max_updates"]:
+        while self.credit >= bt and self.replay.ready(self.spec["T"]) and done_updates < cap:
             self.credit -= bt
             batch = {k: torch.as_tensor(v, device=self.device) for k, v in self.replay.sample(self.spec["batch"], self.spec["T"], self.rng).items()}
             m = self.model.update(batch)
             done_updates += 1
             if m is not None:
                 self.last = {k: float(v) for k, v in m.items() if v.ndim == 0}
-        self.credit = min(self.credit, bt * self.spec["max_updates"])
+        self.credit = min(self.credit, bt * cap)
         self.updates += done_updates
-        return {**self.last, "model_updates": float(done_updates)}
+        return {**self.last, "model_updates": float(done_updates), "train_ratio_eff": self.updates * bt / max(self.credited_steps, 1)}
 
     def fmt(self, stats: dict) -> str:
-        return "DR " + " ".join(f"{k}:{stats[k]:.3g}" for k in self.spec["log_keys"] if k in stats) + f" upd:{int(stats['model_updates'])} replay:{int(self.replay.n.sum())}"
+        return "DR " + " ".join(f"{k}:{stats[k]:.3g}" for k in self.spec["log_keys"] if k in stats) + f" upd:{int(stats['model_updates'])} ratio:{stats['train_ratio_eff']:.3g}/{self.spec['train_ratio']} replay:{int(self.replay.n.sum())}"
 
     def save(self, path, extra: dict):
         torch.save({'model': self.model.state_dict(), 'optimizer': self.model.opt.state_dict(), 'agent': self.kind, **extra}, path)

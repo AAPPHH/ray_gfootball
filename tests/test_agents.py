@@ -200,6 +200,21 @@ class Updates(unittest.TestCase):
         self.assertTrue(all(math.isfinite(float(v)) for v in stats.values()))
         self.assertIn("DR", learner.fmt(stats))
 
+    def test_dreamer_default_max_updates_reaches_the_configured_train_ratio(self):
+        self.assertIsNone(tr.CONFIG["dreamer"]["max_updates"])
+        cfg = small_cfg("dreamer")
+        cfg["dreamer"].update(max_updates=None, train_ratio=4)
+        spec = tr.agent_spec(cfg)
+        spec["rollout_len"] = 200
+        learner = ag.make_agent(spec, learner=True)
+        learner.attach(lg.PureLeague(Path(tempfile.mkdtemp()), spec))
+        r = self.rollout("dreamer")
+        learner.observe(r, 25.0)
+        stats = learner.update([r])
+        self.assertEqual(stats["model_updates"], 200 * 4 / (2 * 8))
+        self.assertAlmostEqual(stats["train_ratio_eff"], 4.0)
+        self.assertIn("ratio:4/4", learner.fmt(stats))
+
     def test_dreamer_replay_holds_terminal_records_and_carries_reward(self):
         learner = learner_for("dreamer")
         n = 6

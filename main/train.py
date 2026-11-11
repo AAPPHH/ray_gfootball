@@ -30,7 +30,7 @@ CONFIG = {
         golden_capacity=2048, golden_max_uses=5, vtrace=dict(VTRACE),
     ),
     "dreamer": dict(
-        batch=16, T=64, replay_cap=1_000_000, prefill=20_000, train_ratio=16, max_updates=64, seed=0, device="auto",
+        batch=16, T=64, replay_cap=1_000_000, prefill=20_000, train_ratio=16, max_updates=None, seed=0, device="auto",
         log_keys=["loss", "world", "dyn", "rep", "recon", "rew", "actor", "critic", "actor_entropy", "ret"],
         model={
             "deter": 512, "hidden": 512, "units": 512, "stoch": 16, "discrete": 16, "layers": 2, "head_layers": 1, "unimix": 0.01,
