@@ -31,7 +31,7 @@ CONFIG = {
     ),
     "dreamer": dict(
         batch=16, T=64, replay_cap=1_000_000, prefill=20_000, train_ratio=16, max_updates=None, seed=0, device="auto",
-        log_keys=["loss", "world", "dyn", "rep", "recon", "rew", "actor", "critic", "actor_entropy", "ret"],
+        log_keys=["dyn", "rep", "recon", "rew", "con", "policy", "value", "repval", "actor_entropy", "ret_mean", "v_ev", "adv_std"],
         model={
             "deter": 512, "hidden": 512, "units": 512, "stoch": 16, "discrete": 16, "layers": 2, "head_layers": 1, "unimix": 0.01,
             "bins": 255, "bin_lim": 20.0, "min_std": 0.1, "max_std": 1.0, "log_sigma_lim": (-5.0, 2.0), "repval_detach": True,

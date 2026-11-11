@@ -215,6 +215,13 @@ class Updates(unittest.TestCase):
         self.assertAlmostEqual(stats["train_ratio_eff"], 4.0)
         self.assertIn("ratio:4/4", learner.fmt(stats))
 
+    def test_default_dreamer_log_keys_are_real_metrics(self):
+        learner = learner_for("dreamer")
+        r = self.rollout("dreamer")
+        learner.observe(r, 25.0)
+        stats = learner.update([r])
+        self.assertEqual([k for k in tr.CONFIG["dreamer"]["log_keys"] if k not in stats], [])
+
     def test_dreamer_replay_holds_terminal_records_and_carries_reward(self):
         learner = learner_for("dreamer")
         n = 6
