@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import math
+import shutil
 import time
 from pathlib import Path
 
@@ -11,14 +12,15 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 CONFIG = {
-    "updates": 200,
+    "updates": 40,
     "timeout_s": 3600,
     "call_timeout_s": 300,
     "poll_s": 5,
-    "driver_threads": 8,
+    "driver_threads": 4,
+    "min_free_cpus": 8,
     "out_dir": str(HERE.parent / "smoke_out"),
     "ray": {"address": "auto", "namespace": None, "worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * 1024 ** 3}},
-    "learner": {"num_workers": 8, "rollout_len": 128, "batch_size": 8, "goal_traj_len": 64, "golden_capacity": 256},
+    "learner": {"num_workers": 4, "rollout_len": 512, "batch_size": 4, "goal_traj_len": 64, "golden_capacity": 256},
     "eval": {"every": 0},
     "warmstart": None,
     "expert_parquet": None,
@@ -63,6 +65,8 @@ def make_learner_class(fl, state):
             state["finite"] = state["finite"] and all(math.isfinite(float(v)) for v in stats.values())
             state["last"] = {k: float(v) for k, v in stats.items()}
             if state["done"] >= CONFIG["updates"]:
+                self.updates += 1
+                self._log_progress(stats)
                 raise SmokeDone
             return stats
 
@@ -75,7 +79,8 @@ def run():
     import actor_critic
     import full_league as fl
     out = Path(CONFIG["out_dir"])
-    out.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
     state = {"done": 0, "finite": True, "last": None, "sil_calls": 0}
     torch.set_num_threads(CONFIG["driver_threads"])
     summary = {"updates_requested": CONFIG["updates"], "workers": CONFIG["learner"]["num_workers"], "ok": False, "error": None}
@@ -86,7 +91,7 @@ def run():
              runtime_env={"py_modules": [str(Path(actor_critic.__file__).resolve().parent)], "working_dir": str(HERE), "excludes": ["__pycache__", "smoke_out"],
                           "env_vars": {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}})
     learner = None
-    need = CONFIG["learner"]["num_workers"] * CONFIG["ray"]["worker"]["num_cpus"]
+    need = max(CONFIG["min_free_cpus"], CONFIG["learner"]["num_workers"] * CONFIG["ray"]["worker"]["num_cpus"])
     free = ray.available_resources().get("CPU", 0)
     if free < need:
         ray.shutdown()
@@ -105,6 +110,9 @@ def run():
         summary["error"] = f"{type(e).__name__}: {e}"
     finally:
         if learner is not None:
+            stats = learner.league.get_stats()
+            summary["league"] = {"games_by_opp": stats["games_by_opp"], "snap_games": stats["snap_games"], "total_games": stats["total_games"],
+                                 "EMH": {tag: stats["bots"][name]["games"] for tag, name in (("E", "bot_easy"), ("M", "bot_medium"), ("H", "bot_hard"))}}
             learner.close()
         ray.shutdown()
     summary.update({"updates_done": state["done"], "total_steps": learner.total_steps if learner else 0, "losses_finite": state["finite"], "sil_path_ran": state["sil_calls"] > 0, "sil_calls": state["sil_calls"], "last_stats": state["last"], "wall_s": round(time.time() - t0, 1)})
