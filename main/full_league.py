@@ -15,6 +15,7 @@ import trueskill
 import pyarrow.parquet as pq
 import ray
 import gfootball.env as football_env
+from impala_dreamer.impala import PopArtAdapter, impala_loss, impala_targets
 
 FEATURE_DIM, OBS_DIM, NUM_ACTIONS = 93, 115, 19
 trueskill.setup(backend='mpmath')
@@ -544,23 +545,7 @@ class Net(nn.Module):
         actions = logits.argmax(dim=-1) if deterministic else dist.sample()
         return actions, dist.log_prob(actions), self.value.denormalize(values_norm), hidden
 
-def vtrace(behavior_lp, target_lp, rewards, values, bootstrap, dones, gamma=0.99, rho_bar=1.0, c_bar=1.0):
-    B, T = rewards.shape
-    rhos = torch.exp((target_lp - behavior_lp).clamp(-20, 20))
-    clipped_rhos = torch.clamp(rhos, max=rho_bar)
-    cs = torch.clamp(rhos, max=c_bar)
-    not_done = 1.0 - dones
-    values_tp1 = torch.cat([values[:, 1:], bootstrap.unsqueeze(1)], dim=1)
-    deltas = clipped_rhos * (rewards + gamma * values_tp1 * not_done - values)
-    vs_minus_v = torch.zeros_like(rewards)
-    acc = torch.zeros(B, device=rewards.device)
-    for t in reversed(range(T)):
-        acc = deltas[:, t] + gamma * cs[:, t] * acc * not_done[:, t]
-        vs_minus_v[:, t] = acc
-    vs = values + vs_minus_v
-    vs_tp1 = torch.cat([vs[:, 1:], bootstrap.unsqueeze(1)], dim=1)
-    advantages = clipped_rhos * (rewards + gamma * vs_tp1 * not_done - values)
-    return vs, advantages, clipped_rhos
+VTRACE_CFG = {"rho_bar": 1.0, "c_bar": 1.0, "log_rho_clip": 20.0, "adv_sigma_norm": False, "value_loss_form": "mse"}
 
 @ray.remote(num_cpus=1)
 class SelfPlayWorker:
@@ -1059,17 +1044,15 @@ class LeagueLearner:
             target_lp = dist.log_prob(act)
             entropy = dist.entropy()
             values = self.model.value.denormalize(values_norm)
+        m = mask.bool()
+        vcfg = {**VTRACE_CFG, "gamma": self.gamma, "alpha": self.entropy_coeff, "value_coef": self.value_coeff}
+        targets = impala_targets(beh_lp, target_lp.detach(), rew, values.detach(), done, bootstrap.float(), PopArtAdapter(self.model.value), vcfg, mask=m)
         with torch.no_grad():
-            vs, adv, rhos = vtrace(beh_lp, target_lp.float().detach(), rew, values.float().detach(), bootstrap.float(), done, self.gamma)
-            self.model.value.update_stats(vs[mask.bool()])
-            vs_norm = self.model.value.normalize_target(vs)
-            mean_rho = rhos[mask.bool()].mean().item()
-            max_rho = rhos[mask.bool()].max().item()
+            mean_rho = targets["avg_rho"]
+            max_rho = targets["diag"]["is_ratio"].clamp(max=vcfg["rho_bar"])[m].max().item()
         with autocast('cuda'):
-            policy_loss = -((target_lp * adv.detach()) * mask).sum() / mask.sum()
-            value_loss = ((values_norm - vs_norm.detach()) ** 2 * mask).sum() / mask.sum()
-            ent_loss = -(entropy * mask).sum() / mask.sum()
-            loss = policy_loss + self.value_coeff * value_loss + self.entropy_coeff * ent_loss
+            losses = impala_loss(targets, target_lp[m], entropy[m], values_norm[m], vcfg, mask=m)
+        loss, policy_loss, value_loss = losses["loss"], losses["policy"], losses["value"]
         self.optimizer.zero_grad()
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
