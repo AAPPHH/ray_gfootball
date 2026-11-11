@@ -673,6 +673,7 @@ class SelfPlayWorker:
         data = {k: [] for k in ['obs', 'feat', 'prev_act', 'act', 'lp', 'rew', 'done']}
         episodes = []
         goal_trajectories = []
+        game_over = False
         for _ in range(self.rollout_len):
             with torch.no_grad():
                 act, lp, _, self.hidden = self.model.get_action(
@@ -722,12 +723,14 @@ class SelfPlayWorker:
             data['rew'].append(rew)
             data['done'].append(float(bool(done)))
             if bool(done):
+                game_over = True
                 episodes.append({
                     'return': self.ep_ret, 'won': self.ep_score[0] > self.ep_score[1],
                     'drawn': self.ep_score[0] == self.ep_score[1], 'length': self.ep_len,
                     'opponent': opponent_type, 'goals_scored': self.ep_score[0]
                 })
                 self._reset()
+                break
             elif is_selfplay:
                 if isinstance(raw_obs, list) and len(raw_obs) == 2:
                     self.obs = np.array(raw_obs[0]).flatten()[:OBS_DIM].astype(np.float32)
@@ -756,6 +759,7 @@ class SelfPlayWorker:
             'done': np.array(data['done'], dtype=np.float32),
             'bootstrap': bootstrap.item(),
             'episodes': episodes,
+            'game_over': game_over,
             'opponent_type': opponent_type,
             'goal_trajectories': goal_trajectories
         }
@@ -914,6 +918,23 @@ class GoldenMemoryGPU(GoldenMemory):
     def __len__(self):
         return self.size
 
+class StickyDispatcher:
+    def __init__(self, league: PureLeague, eval_bots: List[str], eval_period: int = 50):
+        self.league, self.eval_bots, self.eval_period = league, eval_bots, eval_period
+        self.cycle = 0
+        self.assigned = {}
+
+    def assign(self, wid: int, game_over: bool, rating: trueskill.Rating):
+        current = self.assigned.get(wid)
+        if current is not None and not game_over:
+            return (*current, None)
+        self.cycle += 1
+        slot = self.cycle % self.eval_period
+        opponent, _ = self.league.select_opponent(rating, force_bot=self.eval_bots[slot] if slot < len(self.eval_bots) else None)
+        weights = self.league.get_member_weights(opponent)
+        self.assigned[wid] = (opponent, self.league.get_env_config(opponent), "snapshot" if weights else opponent)
+        return (*self.assigned[wid], weights)
+
 class LeagueLearner:
     def __init__(self, num_workers: int = 24, rollout_len: int = 512, batch_size: int = 24, lr: float = 5e-4, gamma: float = 1.0,
                  entropy_coeff: float = 0.01, value_coeff: float = 0.5, sil_coeff: float = 0.5,
@@ -978,8 +999,7 @@ class LeagueLearner:
         self.returns_vs_hard = deque(maxlen=100)
         self.pending = {}
         self.queue = []
-        self.eval_cycle = 0
-        self.eval_bots = ["random", "lazy", "bot_easy", "bot_medium", "bot_hard"]
+        self.dispatcher = StickyDispatcher(self.league, ["random", "lazy", "bot_easy", "bot_medium", "bot_hard"])
         self._print_config(lr, golden_capacity, golden_max_uses)
 
     def _print_config(self, lr, golden_capacity, golden_max_uses):
@@ -997,13 +1017,9 @@ class LeagueLearner:
     def _weights(self) -> dict:
         return {k: v.cpu().numpy() for k, v in self.model.state_dict().items()}
 
-    def _dispatch(self, w):
-        self.eval_cycle += 1
-        force_bot = self.eval_bots[self.eval_cycle % 50] if self.eval_cycle % 50 < len(self.eval_bots) else None
-        opponent, _ = self.league.select_opponent(self.current_rating, force_bot=force_bot)
-        opp_weights = self.league.get_member_weights(opponent)
-        opp_type = "snapshot" if opp_weights else opponent
-        self.pending[w.collect.remote(self.league.get_env_config(opponent), opp_type, opp_weights)] = (w, opponent)
+    def _dispatch(self, w, game_over: bool = True):
+        opponent, env_config, opp_type, opp_weights = self.dispatcher.assign(self.workers.index(w), game_over, self.current_rating)
+        self.pending[w.collect.remote(env_config, opp_type, opp_weights)] = (w, opponent)
 
     def _prepare_batch(self, rollouts):
         max_len = max(r['obs'].shape[0] for r in rollouts)
@@ -1174,7 +1190,7 @@ class LeagueLearner:
                     for traj in rollout.get('goal_trajectories', []):
                         self.golden.add(traj, opp_mu)
                     w.set_weights.remote(self._weights())
-                    self._dispatch(w)
+                    self._dispatch(w, rollout['game_over'])
             batch = self.queue[:self.batch_size]
             self.queue = self.queue[self.batch_size:]
             stats = self._update(batch)
