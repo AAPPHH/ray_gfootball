@@ -863,7 +863,10 @@ class EvalRunner:
 
     def close(self):
         for a in self.actors.values():
-            ray.kill(a)
+            try:
+                ray.kill(a)
+            except Exception:
+                pass
 
 class ExpertBufferGPU:
     def __init__(self, parquet_path: str, device: torch.device, window_len: int = 512):
@@ -1350,7 +1353,10 @@ class LeagueLearner:
                 ray.cancel(ref)
             except:
                 pass
-        self.evaluator.close()
+        try:
+            self.evaluator.close()
+        except Exception as e:
+            print(f"  evaluator close failed: {type(e).__name__}")
         for w in self.workers:
             try:
                 ray.get(w.close.remote(), timeout=2)
