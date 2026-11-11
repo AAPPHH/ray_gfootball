@@ -20,7 +20,6 @@ spec.loader.exec_module(FL)
 from impala_dreamer.impala import compute_vtrace, impala_targets
 
 ATOL = 1e-6
-VTRACE_ATOL = 2e-6
 CFG = {"gamma": 0.999, "rho_bar": 1.0, "c_bar": 1.0, "log_rho_clip": 20.0, "adv_sigma_norm": False, "value_loss_form": "mse"}
 
 
@@ -176,9 +175,9 @@ class ParityTests(unittest.TestCase):
                 vs, adv, rhos = frozen_vtrace(lp_b, lp_t, rew, values, bootstrap, done, 0.999)
                 pv, pa, avg_rho, diag = compute_vtrace(lp_b, lp_t, rew, values, done, bootstrap, 0.999, 1.0, 1.0, 20.0)
                 m = mask.bool()
-                self.assertTrue(torch.allclose(vs.reshape(-1), pv, atol=VTRACE_ATOL))
-                self.assertTrue(torch.allclose(adv.reshape(-1), pa, atol=VTRACE_ATOL))
-                self.assertTrue(torch.allclose(rhos[m].mean(), torch.tensor(float(diag["is_ratio"].clamp(max=1.0)[m].mean())), atol=VTRACE_ATOL))
+                self.assertTrue(torch.allclose(vs.reshape(-1), pv, atol=ATOL))
+                self.assertTrue(torch.allclose(adv.reshape(-1), pa, atol=ATOL))
+                self.assertTrue(torch.allclose(rhos[m].mean(), torch.tensor(float(diag["is_ratio"].clamp(max=1.0)[m].mean())), atol=ATOL))
 
     def test_popart_matches_adapter(self):
         gen = torch.Generator().manual_seed(1)
