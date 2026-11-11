@@ -71,3 +71,4 @@ tzdata==2025.2
 urllib3==2.5.0
 virtualenv==20.35.3
 wrapt==2.0.0
+impala-dreamer @ git+https://github.com/AAPPHH/impala-dreamer@v0.1.0
