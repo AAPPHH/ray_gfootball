@@ -343,7 +343,7 @@ class PureLeague:
                 'rating_update_factor': m.rating_update_factor, 'recent_wins': list(m.recent_wins),
                 'recent_draws': list(m.recent_draws), 'created_idx': m.created_idx
             } for name, m in self.members.items()},
-            'champion': self.champion, 'last_snapshot_rating': self.last_snapshot_rating,
+            'agent': self.spec['agent'], 'champion': self.champion, 'last_snapshot_rating': self.last_snapshot_rating,
             'wins_vs_champion': self.wins_vs_champion, 'total_games': self.total_games,
             'snapshot_counter': self.snapshot_counter,
             'policy_fingerprints': {k: v.tolist() for k, v in self.policy_fingerprints.items()}
@@ -357,6 +357,9 @@ class PureLeague:
             return False
         with open(path, 'rb') as f:
             state = pickle.load(f)
+        found = state.get('agent', 'impala')
+        if found != self.spec['agent']:
+            raise ValueError(f"league {path} was written by agent {found!r}, current agent is {self.spec['agent']!r}; use a separate checkpoint_dir per agent")
         self.members = {}
         for name, d in state['members'].items():
             m = LeagueMember(

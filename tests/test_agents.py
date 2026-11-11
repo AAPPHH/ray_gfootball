@@ -85,6 +85,37 @@ class Interface(unittest.TestCase):
                 for k, v in a.model.state_dict().items():
                     self.assertTrue(torch.equal(v, b.model.state_dict()[k]))
 
+    def test_checkpoint_and_league_of_another_agent_are_refused(self):
+        a, b = learner_for("impala"), learner_for("dreamer")
+        path = Path(tempfile.mkdtemp()) / "c.pt"
+        a.save(path, {"updates": 3})
+        with self.assertRaisesRegex(ValueError, "impala.*dreamer"):
+            b.load(path)
+        a.league.save()
+        b.league.checkpoint_dir = a.league.checkpoint_dir
+        with self.assertRaisesRegex(ValueError, "impala.*dreamer"):
+            b.league.load()
+        self.assertTrue(a.league.load())
+
+    def test_trainer_dir_is_per_agent(self):
+        old = tr.ray, lg.ray, tr.SelfPlayWorker
+        tr.ray = lg.ray = FakeRay()
+        tr.SelfPlayWorker = FakeWorkerClass()
+        try:
+            base = tempfile.mkdtemp()
+            dirs = []
+            for kind in KINDS:
+                cfg = small_cfg(kind)
+                cfg["paths"]["checkpoint_dir"] = base
+                cfg.update(eval={**cfg["eval"], "every": 0})
+                t = tr.LeagueTrainer(cfg)
+                dirs.append(t.checkpoint_dir)
+                t._save_checkpoint()
+                t.close()
+            self.assertEqual(dirs, [Path(base) / k for k in KINDS])
+        finally:
+            tr.ray, lg.ray, tr.SelfPlayWorker = old
+
 
 class Rollouts(unittest.TestCase):
     def test_worker_rollout_with_each_agent(self):

@@ -287,7 +287,7 @@ class Agent:
         self.model.load_state_dict({k: torch.from_numpy(v.copy()) for k, v in weights.items()}, strict=self.strict)
 
     def save_snapshot(self, path):
-        torch.save({'model': self.policy_state()}, path)
+        torch.save({'model': self.policy_state(), 'agent': self.kind}, path)
 
     def act(self, obs, feat, prev_act, first, state, deterministic=False):
         raise NotImplementedError
@@ -309,6 +309,13 @@ class Agent:
 
     def load(self, path) -> dict:
         raise NotImplementedError
+
+    def read_checkpoint(self, path) -> dict:
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        found = ckpt.get('agent', 'impala')
+        if found != self.kind:
+            raise ValueError(f"checkpoint {path} was written by agent {found!r}, current agent is {self.kind!r}; use a separate checkpoint_dir per agent")
+        return ckpt
 
 
 class ImpalaAgent(Agent):
@@ -469,10 +476,10 @@ class ImpalaAgent(Agent):
         return f"VT L:{stats['loss']:.2f} p:{stats['pi']:+.3f} v:{stats['v']:.2f} H:{stats['ent']:.2f} rho:{stats['rho']:.1f}/{stats['rho_max']:.1f} EV:{stats['ev']:.2f} | {exp_str} | {sil_str} | GM:{gm['size']}({gm['fresh']}) | grad:{stats['grad']:.1f}->{stats['grad_clip']:.1f}"
 
     def save(self, path, extra: dict):
-        torch.save({'model': self.model.state_dict(), 'optimizer': self.optimizer.state_dict(), **extra}, path)
+        torch.save({'model': self.model.state_dict(), 'optimizer': self.optimizer.state_dict(), 'agent': self.kind, **extra}, path)
 
     def load(self, path) -> dict:
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        ckpt = self.read_checkpoint(path)
         self.model.load_state_dict(ckpt['model'])
         self.optimizer.load_state_dict(ckpt['optimizer'])
         return ckpt
@@ -555,10 +562,10 @@ class DreamerAgent(Agent):
         return "DR " + " ".join(f"{k}:{stats[k]:.3g}" for k in self.spec["log_keys"] if k in stats) + f" upd:{int(stats['model_updates'])} replay:{int(self.replay.n.sum())}"
 
     def save(self, path, extra: dict):
-        torch.save({'model': self.model.state_dict(), 'optimizer': self.model.opt.state_dict(), **extra}, path)
+        torch.save({'model': self.model.state_dict(), 'optimizer': self.model.opt.state_dict(), 'agent': self.kind, **extra}, path)
 
     def load(self, path) -> dict:
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        ckpt = self.read_checkpoint(path)
         self.model.load_state_dict(ckpt['model'])
         self.model.opt.load_state_dict(ckpt['optimizer'])
         return ckpt

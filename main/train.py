@@ -82,7 +82,7 @@ class LeagueTrainer:
         l = cfg["learner"]
         self.cfg, self.num_workers, self.rollout_len, self.batch_size = cfg, l["num_workers"], l["rollout_len"], l["batch_size"]
         self.spec = agent_spec(cfg)
-        self.checkpoint_dir = Path(cfg["paths"]["checkpoint_dir"])
+        self.checkpoint_dir = Path(cfg["paths"]["checkpoint_dir"]) / cfg["agent"]
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.agent = make_agent(self.spec, learner=True)
         self.current_rating = TS_ENV.create_rating(mu=25.0, sigma=8.333)
