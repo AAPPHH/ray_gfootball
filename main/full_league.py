@@ -1,3 +1,4 @@
+import json
 import time
 import math
 import pickle
@@ -32,12 +33,39 @@ CONFIG = {
         min_skill_spacing=3.0, min_policy_distance=0.02,
         goal_traj_len=128, golden_capacity=2048, golden_max_uses=5,
     ),
+    "eval": {"every": 50, "games": 50, "bots": ["bot_easy", "bot_medium", "bot_hard"], "file": "eval.jsonl", "torch_threads": 1,
+             "actor": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * 1024 ** 3}},
     "train_seconds": 24 * 3600,
 }
 
+BOT_CONFIGS = [
+    ("random", 5.0, 2.0, "11_vs_11_stochastic", False),
+    ("lazy", 8.0, 2.0, "11_vs_11_stochastic", False),
+    ("bot_easy", 18.0, 2.0, "11_vs_11_easy_stochastic", True),
+    ("bot_medium", 28.0, 2.0, "11_vs_11_stochastic", True),
+    ("bot_hard", 38.0, 2.0, "11_vs_11_hard_stochastic", True),
+]
+BOT_ENVS = {name: env_name for name, _, _, env_name, _ in BOT_CONFIGS}
 FEATURE_DIM, OBS_DIM, NUM_ACTIONS = 93, 115, 19
 trueskill.setup(backend='mpmath')
 TS_ENV = trueskill.TrueSkill(mu=25.0, sigma=8.333, beta=4.166, tau=0.083, draw_probability=0.05)
+
+def wilson_ci(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
+    if n == 0:
+        return 0.0, 1.0
+    p = k / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+def summarize_games(episodes: List[dict]) -> dict:
+    n = len(episodes)
+    wins = sum(e['won'] for e in episodes)
+    draws = sum(e['drawn'] for e in episodes)
+    lo, hi = wilson_ci(wins, n)
+    return {'n': n, 'win': wins, 'draw': draws, 'loss': n - wins - draws, 'win_rate': wins / n if n else 0.0, 'ci_lo': lo, 'ci_hi': hi,
+            'goal_diff': float(np.mean([e['goals_scored'] - e['goals_conceded'] for e in episodes])) if n else 0.0}
 
 def explained_variance(values: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor = None) -> float:
     values, targets = values.reshape(-1), targets.reshape(-1)
@@ -119,14 +147,7 @@ class PureLeague:
         self._init_bots()
 
     def _init_bots(self):
-        bot_configs = [
-            ("random", 5.0, 2.0, "11_vs_11_stochastic", False),
-            ("lazy", 8.0, 2.0, "11_vs_11_stochastic", False),
-            ("bot_easy", 18.0, 2.0, "11_vs_11_easy_stochastic", True),
-            ("bot_medium", 28.0, 2.0, "11_vs_11_stochastic", True),
-            ("bot_hard", 38.0, 2.0, "11_vs_11_hard_stochastic", True),
-        ]
-        for name, mu, sigma, env_name, controls_right in bot_configs:
+        for name, mu, sigma, env_name, controls_right in BOT_CONFIGS:
             self.members[name] = LeagueMember(
                 name=name, member_type="bot", rating=TS_ENV.create_rating(mu=mu, sigma=sigma),
                 env_name=env_name, controls_right=controls_right, rating_update_factor=0.0
@@ -573,8 +594,7 @@ class Net(nn.Module):
         actions = logits.argmax(dim=-1) if deterministic else dist.sample()
         return actions, dist.log_prob(actions), self.value.denormalize(values_norm), hidden
 
-@ray.remote(num_cpus=1)
-class SelfPlayWorker:
+class SelfPlayCore:
     def __init__(self, wid: int, d_model: int, lstm_hidden: int, rollout_len: int = 512, goal_traj_len: int = 128):
         self.wid = wid
         self.d_model = d_model
@@ -737,7 +757,7 @@ class SelfPlayWorker:
                 episodes.append({
                     'return': self.ep_ret, 'won': self.ep_score[0] > self.ep_score[1],
                     'drawn': self.ep_score[0] == self.ep_score[1], 'length': self.ep_len,
-                    'opponent': opponent_type, 'goals_scored': self.ep_score[0]
+                    'opponent': opponent_type, 'goals_scored': self.ep_score[0], 'goals_conceded': self.ep_score[1]
                 })
                 self._reset()
                 break
@@ -777,6 +797,64 @@ class SelfPlayWorker:
     def close(self):
         if self.env is not None:
             self.env.close()
+
+SelfPlayWorker = ray.remote(num_cpus=1)(SelfPlayCore)
+
+class EvalCore(SelfPlayCore):
+    def __init__(self, d_model: int, lstm_hidden: int, rollout_len: int, threads: int):
+        torch.set_num_threads(threads)
+        super().__init__(-1, d_model, lstm_hidden, rollout_len)
+
+    def evaluate(self, weights: dict, bot: str, games: int) -> List[dict]:
+        self.set_weights(weights)
+        episodes = []
+        while len(episodes) < games:
+            episodes += self.collect((BOT_ENVS[bot], 1, 0), bot)['episodes']
+        return episodes
+
+Evaluator = ray.remote(EvalCore)
+
+class EvalRunner:
+    def __init__(self, cfg: dict, d_model: int, lstm_hidden: int, rollout_len: int, out_path: Path):
+        self.cfg, self.out_path = cfg, Path(out_path)
+        self.actors = {bot: Evaluator.options(**cfg["actor"]).remote(d_model, lstm_hidden, rollout_len, cfg["torch_threads"]) for bot in cfg["bots"]} if cfg["every"] > 0 else {}
+        self.refs, self.results, self.meta = {}, {}, None
+        self.last = {}
+
+    def due(self, updates: int) -> bool:
+        return bool(self.actors) and updates % self.cfg["every"] == 0 and not self.refs
+
+    def start(self, updates: int, steps: int, weights: dict):
+        shared = ray.put(weights)
+        self.refs = {actor.evaluate.remote(shared, bot, self.cfg["games"]): bot for bot, actor in self.actors.items()}
+        self.results, self.meta = {}, {"update": updates, "steps": steps, "start": time.time()}
+
+    def poll(self):
+        if not self.refs:
+            return None
+        ready, _ = ray.wait(list(self.refs), num_returns=len(self.refs), timeout=0)
+        for ref in ready:
+            bot = self.refs.pop(ref)
+            try:
+                self.results[bot] = summarize_games(ray.get(ref))
+            except Exception as e:
+                print(f"  eval {bot} failed: {type(e).__name__}")
+                self.refs.clear()
+                return None
+        if self.refs:
+            return None
+        meta = dict(self.meta)
+        wall = round(time.time() - meta.pop("start"), 1)
+        record = {**meta, "wall_s": wall, "bots": self.results}
+        with open(self.out_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+        self.last = record
+        print("  EVAL u{update} ".format(**record) + " ".join(f"{b.replace('bot_', '')[0].upper()}:{r['win']}/{r['draw']}/{r['loss']} wr={r['win_rate']*100:.0f}% [{r['ci_lo']*100:.0f},{r['ci_hi']*100:.0f}] gd={r['goal_diff']:+.2f}" for b, r in record["bots"].items()))
+        return record
+
+    def close(self):
+        for a in self.actors.values():
+            ray.kill(a)
 
 class ExpertBufferGPU:
     def __init__(self, parquet_path: str, device: torch.device, window_len: int = 512):
@@ -1010,6 +1088,7 @@ class LeagueLearner:
         self.returns_vs_hard = deque(maxlen=100)
         self.pending = {}
         self.queue = []
+        self.evaluator = EvalRunner(CONFIG["eval"], d_model, lstm_hidden, rollout_len, self.checkpoint_dir / CONFIG["eval"]["file"])
         self.dispatcher = StickyDispatcher(self.league, ["random", "lazy", "bot_easy", "bot_medium", "bot_hard"])
         self._print_config(lr, golden_capacity, golden_max_uses)
 
@@ -1221,6 +1300,9 @@ class LeagueLearner:
                 if golden_batch:
                     stats_sil = self._update_sil_gpu(golden_batch)
             self._maybe_snapshot()
+            self.evaluator.poll()
+            if self.evaluator.due(self.updates):
+                self.evaluator.start(self.updates, self.total_steps, self._weights())
             if self.updates % 10 == 0:
                 self._log_progress(stats, stats_exp, stats_sil)
             if self.updates % 100 == 0:
@@ -1248,6 +1330,7 @@ class LeagueLearner:
                 ray.cancel(ref)
             except:
                 pass
+        self.evaluator.close()
         for w in self.workers:
             try:
                 ray.get(w.close.remote(), timeout=2)

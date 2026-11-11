@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import tempfile
 import unittest
 import torch
@@ -111,6 +112,82 @@ class ExplainedVariance(unittest.TestCase):
 
     def test_zero_variance_targets(self):
         self.assertEqual(fl.explained_variance(torch.zeros(3, 3), torch.ones(3, 3)), 0.0)
+
+
+class WilsonCI(unittest.TestCase):
+    def test_known_values(self):
+        lo, hi = fl.wilson_ci(10, 20)
+        self.assertAlmostEqual(lo, 0.2993, places=3)
+        self.assertAlmostEqual(hi, 0.7007, places=3)
+        self.assertEqual(fl.wilson_ci(0, 0), (0.0, 1.0))
+        lo, hi = fl.wilson_ci(50, 50)
+        self.assertLessEqual(hi, 1.0)
+        self.assertGreater(lo, 0.9)
+        self.assertEqual(fl.wilson_ci(0, 50)[0], 0.0)
+
+    def test_summary(self):
+        eps = [{"won": True, "drawn": False, "goals_scored": 2, "goals_conceded": 0}, {"won": False, "drawn": True, "goals_scored": 1, "goals_conceded": 1},
+               {"won": False, "drawn": False, "goals_scored": 0, "goals_conceded": 3}]
+        s = fl.summarize_games(eps)
+        self.assertEqual((s["n"], s["win"], s["draw"], s["loss"]), (3, 1, 1, 1))
+        self.assertAlmostEqual(s["goal_diff"], -1.0 / 3)
+        self.assertEqual(fl.summarize_games([])["n"], 0)
+
+
+class FakeRay:
+    def __init__(self):
+        self.ready = set()
+
+    def put(self, x):
+        return x
+
+    def wait(self, refs, num_returns, timeout):
+        return [r for r in refs if r.key in self.ready], [r for r in refs if r.key not in self.ready]
+
+    def get(self, ref):
+        return ref.episodes
+
+
+class FakeRef:
+    def __init__(self, key, episodes):
+        self.key, self.episodes = key, episodes
+
+
+class FakeActor:
+    def __init__(self, key):
+        self.key = key
+        self.evaluate = self
+
+    def remote(self, weights, bot, games):
+        return FakeRef(self.key, [{"won": True, "drawn": False, "goals_scored": 1, "goals_conceded": 0}] * games)
+
+
+class EvalRunnerFlow(unittest.TestCase):
+    def test_non_blocking_round_written_to_jsonl(self):
+        fake, old = FakeRay(), fl.ray
+        fl.ray = fake
+        try:
+            out = Path(tempfile.mkdtemp()) / "eval.jsonl"
+            r = fl.EvalRunner.__new__(fl.EvalRunner)
+            r.cfg, r.out_path = {"every": 50, "games": 4, "bots": ["bot_easy", "bot_hard"]}, out
+            r.actors = {"bot_easy": FakeActor("a"), "bot_hard": FakeActor("b")}
+            r.refs, r.results, r.meta, r.last = {}, {}, None, {}
+            self.assertFalse(r.due(49))
+            self.assertTrue(r.due(50))
+            r.start(50, 1000, {})
+            self.assertFalse(r.due(100))
+            self.assertIsNone(r.poll())
+            fake.ready.add("a")
+            self.assertIsNone(r.poll())
+            self.assertFalse(out.exists())
+            fake.ready.add("b")
+            rec = r.poll()
+            self.assertEqual(rec["update"], 50)
+            self.assertEqual(rec["bots"]["bot_hard"]["n"], 4)
+            self.assertEqual(json.loads(out.read_text())["bots"]["bot_easy"]["win"], 4)
+            self.assertTrue(r.due(100))
+        finally:
+            fl.ray = old
 
 
 if __name__ == "__main__":

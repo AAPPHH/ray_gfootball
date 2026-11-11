@@ -19,6 +19,7 @@ CONFIG = {
     "out_dir": str(HERE.parent / "smoke_out"),
     "ray": {"address": "auto", "namespace": None, "worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * 1024 ** 3}},
     "learner": {"num_workers": 8, "rollout_len": 128, "batch_size": 8, "goal_traj_len": 64, "golden_capacity": 256},
+    "eval": {"every": 0},
     "warmstart": None,
     "expert_parquet": None,
 }
@@ -79,6 +80,7 @@ def run():
     torch.set_num_threads(CONFIG["driver_threads"])
     summary = {"updates_requested": CONFIG["updates"], "workers": CONFIG["learner"]["num_workers"], "ok": False, "error": None}
     t0 = time.time()
+    fl.CONFIG["eval"].update(CONFIG["eval"])
     fl.CONFIG["ray"].update({"address": CONFIG["ray"]["address"], "worker": CONFIG["ray"]["worker"]})
     ray.init(address=CONFIG["ray"]["address"], namespace=CONFIG["ray"]["namespace"], ignore_reinit_error=True, logging_level="WARNING",
              runtime_env={"py_modules": [str(Path(actor_critic.__file__).resolve().parent)], "working_dir": str(HERE), "excludes": ["__pycache__", "smoke_out"],
