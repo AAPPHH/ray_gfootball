@@ -182,7 +182,12 @@ class FakeRay:
         return [r for r in refs if r.key in self.ready], [r for r in refs if r.key not in self.ready]
 
     def get(self, ref):
+        if ref.episodes is None:
+            raise RuntimeError("actor died")
         return ref.episodes
+
+    def kill(self, actor):
+        self.killed.append(actor.key)
 
 
 class FakeRef:
@@ -196,6 +201,8 @@ class FakeActor:
         self.evaluate = self
 
     def remote(self, weights, bot, games):
+        if self.key in self.broken:
+            return FakeRef(self.key, None)
         return FakeRef(self.key, [{"won": True, "drawn": False, "goals_scored": 1, "goals_conceded": 0}] * games)
 
 
@@ -219,23 +226,10 @@ class EvalRunnerFlow(unittest.TestCase):
             self.assertFalse(out.exists())
             fake.ready.add("b")
             rec = r.poll()
-        if ref.episodes is None:
-            raise RuntimeError("actor died")
             self.assertEqual(rec["update"], 50)
             self.assertEqual(rec["bots"]["bot_hard"]["n"], 4)
-    def kill(self, actor):
-        self.killed.append(actor.key)
-
             self.assertEqual(json.loads(out.read_text())["bots"]["bot_easy"]["win"], 4)
             self.assertTrue(r.due(100))
-        finally:
-            fl.ray = old
-
-
-if __name__ == "__main__":
-    unittest.main()
-        if self.key in self.broken:
-            return FakeRef(self.key, None)
             self.assertEqual(rec["errors"], {})
         finally:
             fl.ray = old
@@ -262,6 +256,12 @@ if __name__ == "__main__":
             self.assertIs(r.actors["bot_hard"], spare)
             self.assertEqual(fake.killed, ["b"])
             self.assertEqual(json.loads(out.read_text())["n_errors"], 1)
+            self.assertFalse(r.refs)
+            self.assertTrue(r.due(100))
+        finally:
+            fl.ray = old
+
+
 class EvalBotsValidation(unittest.TestCase):
     def test_only_builtin_bots_allowed(self):
         for bad in ("random", "lazy", "nope"):
@@ -274,5 +274,5 @@ class EvalBotsValidation(unittest.TestCase):
         self.assertEqual(fl.EvalRunner(cfg, 8, 8, 8, Path(tempfile.mkdtemp()) / "e.jsonl").actors, {})
 
 
-            self.assertFalse(r.refs)
-            self.assertTrue(r.due(100))
+if __name__ == "__main__":
+    unittest.main()

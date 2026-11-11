@@ -145,9 +145,9 @@ class PureLeague:
         self.wins_vs_champion = 0
         self.total_games = 0
         self.policy_fingerprints: Dict[str, np.ndarray] = {}
-        self._init_bots()
         self.protected = lambda: set()
         self.dropped_games = 0
+        self._init_bots()
 
     def _init_bots(self):
         for name, mu, sigma, env_name, controls_right in BOT_CONFIGS:
@@ -210,9 +210,9 @@ class PureLeague:
 
     def report_game(self, opponent_name: str, current_rating: trueskill.Rating, won: bool, drawn: bool = False) -> trueskill.Rating:
         if opponent_name not in self.members:
-            return current_rating
             self.dropped_games += 1
             print(f"  game vs removed opponent {opponent_name} not counted ({self.dropped_games} dropped)")
+            return current_rating
         member = self.members[opponent_name]
         self.total_games += 1
         if drawn:
@@ -847,6 +847,7 @@ class EvalRunner:
             try:
                 self.results[bot] = summarize_games(ray.get(ref))
             except Exception as e:
+                self.errors[bot] = type(e).__name__
                 print(f"  eval {bot} failed: {type(e).__name__}")
                 self.replace(bot)
         if self.refs:
@@ -854,12 +855,18 @@ class EvalRunner:
         meta = dict(self.meta)
         wall = round(time.time() - meta.pop("start"), 1)
         record = {**meta, "wall_s": wall, "bots": self.results, "errors": self.errors, "n_errors": len(self.errors)}
-                self.errors[bot] = type(e).__name__
         with open(self.out_path, "a") as f:
             f.write(json.dumps(record) + "\n")
         self.last = record
         print("  EVAL u{update} ".format(**record) + " ".join(f"{b.replace('bot_', '')[0].upper()}:{r['win']}/{r['draw']}/{r['loss']} wr={r['win_rate']*100:.0f}% [{r['ci_lo']*100:.0f},{r['ci_hi']*100:.0f}] gd={r['goal_diff']:+.2f}" for b, r in record["bots"].items()))
         return record
+
+    def replace(self, bot: str):
+        try:
+            ray.kill(self.actors[bot])
+        except Exception:
+            pass
+        self.actors[bot] = self.make()
 
     def close(self):
         for a in self.actors.values():
@@ -872,13 +879,6 @@ class ExpertBufferGPU:
     def __init__(self, parquet_path: str, device: torch.device, window_len: int = 512):
         self.device = device
         self.window_len = window_len
-    def replace(self, bot: str):
-        try:
-            ray.kill(self.actors[bot])
-        except Exception:
-            pass
-        self.actors[bot] = self.make()
-
         self.num_episodes = 0
         self.episode_slices = []
         self.window_slices = []
@@ -1030,6 +1030,10 @@ class StickyDispatcher:
         self.league, self.eval_bots, self.eval_period = league, eval_bots, eval_period
         self.cycle = 0
         self.assigned = {}
+        league.protected = self.in_use
+
+    def in_use(self) -> set:
+        return {a[0] for a in self.assigned.values()}
 
     def assign(self, wid: int, game_over: bool, rating: trueskill.Rating):
         current = self.assigned.get(wid)
@@ -1037,10 +1041,6 @@ class StickyDispatcher:
             return (*current, None)
         self.cycle += 1
         slot = self.cycle % self.eval_period
-        league.protected = self.in_use
-
-    def in_use(self) -> set:
-        return {a[0] for a in self.assigned.values()}
         opponent, _ = self.league.select_opponent(rating, force_bot=self.eval_bots[slot] if slot < len(self.eval_bots) else None)
         weights = self.league.get_member_weights(opponent)
         self.assigned[wid] = (opponent, self.league.get_env_config(opponent), "snapshot" if weights else opponent)
