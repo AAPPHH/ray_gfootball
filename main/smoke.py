@@ -71,7 +71,7 @@ def make_learner_class(fl, state):
 def run():
     import ray
     import torch
-    import impala_dreamer
+    import actor_critic
     import full_league as fl
     out = Path(CONFIG["out_dir"])
     out.mkdir(parents=True, exist_ok=True)
@@ -81,7 +81,7 @@ def run():
     t0 = time.time()
     fl.CONFIG["ray"].update({"address": CONFIG["ray"]["address"], "worker": CONFIG["ray"]["worker"]})
     ray.init(address=CONFIG["ray"]["address"], namespace=CONFIG["ray"]["namespace"], ignore_reinit_error=True, logging_level="WARNING",
-             runtime_env={"py_modules": [str(Path(impala_dreamer.__file__).resolve().parent)], "working_dir": str(HERE), "excludes": ["__pycache__", "smoke_out"],
+             runtime_env={"py_modules": [str(Path(actor_critic.__file__).resolve().parent)], "working_dir": str(HERE), "excludes": ["__pycache__", "smoke_out"],
                           "env_vars": {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}})
     learner = None
     need = CONFIG["learner"]["num_workers"] * CONFIG["ray"]["worker"]["num_cpus"]
