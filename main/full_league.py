@@ -46,6 +46,7 @@ BOT_CONFIGS = [
     ("bot_hard", 38.0, 2.0, "11_vs_11_hard_stochastic", True),
 ]
 BOT_ENVS = {name: env_name for name, _, _, env_name, _ in BOT_CONFIGS}
+BUILTIN_BOTS = ("bot_easy", "bot_medium", "bot_hard")
 FEATURE_DIM, OBS_DIM, NUM_ACTIONS = 93, 115, 19
 trueskill.setup(backend='mpmath')
 TS_ENV = trueskill.TrueSkill(mu=25.0, sigma=8.333, beta=4.166, tau=0.083, draw_probability=0.05)
@@ -820,6 +821,9 @@ Evaluator = ray.remote(EvalCore)
 
 class EvalRunner:
     def __init__(self, cfg: dict, d_model: int, lstm_hidden: int, rollout_len: int, out_path: Path):
+        invalid = [b for b in cfg["bots"] if b not in BUILTIN_BOTS]
+        if invalid:
+            raise ValueError(f"eval.bots {invalid} not allowed, only built-in bots {list(BUILTIN_BOTS)}")
         self.cfg, self.out_path = cfg, Path(out_path)
         self.make = lambda: Evaluator.options(**cfg["actor"]).remote(d_model, lstm_hidden, rollout_len, cfg["torch_threads"])
         self.actors = {bot: self.make() for bot in cfg["bots"]} if cfg["every"] > 0 else {}

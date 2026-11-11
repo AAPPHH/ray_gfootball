@@ -262,5 +262,17 @@ if __name__ == "__main__":
             self.assertIs(r.actors["bot_hard"], spare)
             self.assertEqual(fake.killed, ["b"])
             self.assertEqual(json.loads(out.read_text())["n_errors"], 1)
+class EvalBotsValidation(unittest.TestCase):
+    def test_only_builtin_bots_allowed(self):
+        for bad in ("random", "lazy", "nope"):
+            cfg = {"every": 0, "games": 1, "bots": ["bot_easy", bad], "file": "e", "torch_threads": 1, "actor": {}}
+            with self.assertRaises(ValueError):
+                fl.EvalRunner(cfg, 8, 8, 8, Path(tempfile.mkdtemp()) / "e.jsonl")
+
+    def test_default_bots_accepted(self):
+        cfg = {**fl.CONFIG["eval"], "every": 0}
+        self.assertEqual(fl.EvalRunner(cfg, 8, 8, 8, Path(tempfile.mkdtemp()) / "e.jsonl").actors, {})
+
+
             self.assertFalse(r.refs)
             self.assertTrue(r.due(100))
