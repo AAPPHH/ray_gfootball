@@ -1,5 +1,4 @@
 import copy
-import importlib.util
 import sys
 import unittest
 import warnings
@@ -13,10 +12,9 @@ from torch.distributions import Categorical
 warnings.filterwarnings("ignore")
 torch.set_num_threads(1)
 ROOT = Path(__file__).resolve().parent.parent
-spec = importlib.util.spec_from_file_location("full_league", ROOT / "main" / "full_league.py")
-FL = importlib.util.module_from_spec(spec)
-sys.modules["full_league"] = FL
-spec.loader.exec_module(FL)
+sys.path.insert(0, str(ROOT / "main"))
+import agents as AG
+import football_env as FE
 from actor_critic.impala import compute_vtrace, impala_targets
 
 ATOL = 1e-6
@@ -132,10 +130,10 @@ def make_rollouts(lengths, seed):
     for n in lengths:
         rew = np.where(rng.random(n) < 0.2, rng.normal(size=n), 0.0)
         out.append({
-            'obs': rng.normal(size=(n, FL.OBS_DIM)).astype(np.float32),
-            'feat': rng.normal(size=(n, FL.FEATURE_DIM)).astype(np.float32),
-            'prev_act': rng.integers(0, FL.NUM_ACTIONS, n),
-            'act': rng.integers(0, FL.NUM_ACTIONS, n),
+            'obs': rng.normal(size=(n, FE.OBS_DIM)).astype(np.float32),
+            'feat': rng.normal(size=(n, FE.FEATURE_DIM)).astype(np.float32),
+            'prev_act': rng.integers(0, FE.NUM_ACTIONS, n),
+            'act': rng.integers(0, FE.NUM_ACTIONS, n),
             'lp': (-rng.random(n) * 3).astype(np.float32),
             'rew': rew.astype(np.float32),
             'done': (rng.random(n) < 0.03).astype(np.float32),
@@ -145,7 +143,7 @@ def make_rollouts(lengths, seed):
 
 
 def make_learner(model, seed_lr=1e-3):
-    learner = object.__new__(FL.LeagueLearner)
+    learner = object.__new__(AG.ImpalaAgent)
     learner.model = model
     learner.device = torch.device("cpu")
     learner.optimizer = torch.optim.Adam(model.parameters(), lr=seed_lr, eps=1e-5)
@@ -158,7 +156,7 @@ def make_learner(model, seed_lr=1e-3):
 
 def twin_models(seed):
     torch.manual_seed(seed)
-    new = FL.Net(32, 32)
+    new = AG.Net(32, 32)
     old = copy.deepcopy(new)
     head = FrozenPopArtValueHead(128)
     head.load_state_dict(old.value.state_dict())
@@ -182,7 +180,7 @@ class ParityTests(unittest.TestCase):
     def test_popart_matches_adapter(self):
         gen = torch.Generator().manual_seed(1)
         old = FrozenPopArtValueHead(128)
-        new = FL.PopArtValueHead(128)
+        new = AG.PopArtValueHead(128)
         new.load_state_dict(old.state_dict())
         self.assertEqual(list(old.state_dict().keys()), list(new.state_dict().keys()))
         for i in range(30):
@@ -203,7 +201,7 @@ class ParityTests(unittest.TestCase):
             for step in range(3):
                 rollouts = make_rollouts(lengths, 10 + step)
                 so = frozen_update(lo, rollouts)
-                sn = FL.LeagueLearner._update(ln, rollouts)
+                sn = AG.ImpalaAgent._update(ln, rollouts)
                 for k in so:
                     self.assertAlmostEqual(so[k], sn[k], delta=ATOL * max(1.0, abs(so[k])), msg=f"{k} step {step} {lengths}")
                 for (n, po), pn in zip(old.named_parameters(), new.parameters()):
@@ -215,7 +213,7 @@ class ParityTests(unittest.TestCase):
     def test_update_changes_state(self):
         _, new = twin_models(4)
         before = [p.detach().clone() for p in new.parameters()]
-        FL.LeagueLearner._update(make_learner(new), make_rollouts([12, 12], 0))
+        AG.ImpalaAgent._update(make_learner(new), make_rollouts([12, 12], 0))
         self.assertTrue(any(not torch.equal(b, p) for b, p in zip(before, new.parameters())))
         self.assertNotEqual(float(new.value.sigma), 1.0)
 

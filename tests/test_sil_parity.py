@@ -1,4 +1,3 @@
-import importlib.util
 import sys
 import unittest
 import warnings
@@ -12,10 +11,9 @@ from torch.distributions import Categorical
 warnings.filterwarnings("ignore")
 torch.set_num_threads(1)
 ROOT = Path(__file__).resolve().parent.parent
-spec = importlib.util.spec_from_file_location("full_league", ROOT / "main" / "full_league.py")
-FL = importlib.util.module_from_spec(spec)
-sys.modules["full_league"] = FL
-spec.loader.exec_module(FL)
+sys.path.insert(0, str(ROOT / "main"))
+import agents as AG
+import football_env as FE
 ATOL = 1e-6
 TRAJ = 12
 
@@ -27,8 +25,8 @@ class FrozenGoldenMemoryGPU:
         self.traj_len = traj_len
         self.device = device
         self.size = 0
-        self.obs = torch.zeros(capacity, traj_len, FL.OBS_DIM, device=device)
-        self.feat = torch.zeros(capacity, traj_len, FL.FEATURE_DIM, device=device)
+        self.obs = torch.zeros(capacity, traj_len, FE.OBS_DIM, device=device)
+        self.feat = torch.zeros(capacity, traj_len, FE.FEATURE_DIM, device=device)
         self.act = torch.zeros(capacity, traj_len, dtype=torch.long, device=device)
         self.prev_act = torch.zeros(capacity, traj_len, dtype=torch.long, device=device)
         self.rew = torch.zeros(capacity, traj_len, device=device)
@@ -142,12 +140,12 @@ def traj(rng, n):
     rew[-1] = 1.0
     done = np.zeros(n, dtype=np.float32)
     done[-1] = 1.0
-    return {'obs': rng.normal(size=(n, FL.OBS_DIM)).astype(np.float32), 'feat': rng.normal(size=(n, FL.FEATURE_DIM)).astype(np.float32),
-            'prev_act': rng.integers(0, FL.NUM_ACTIONS, n), 'act': rng.integers(0, FL.NUM_ACTIONS, n), 'rew': rew, 'done': done}
+    return {'obs': rng.normal(size=(n, FE.OBS_DIM)).astype(np.float32), 'feat': rng.normal(size=(n, FE.FEATURE_DIM)).astype(np.float32),
+            'prev_act': rng.integers(0, FE.NUM_ACTIONS, n), 'act': rng.integers(0, FE.NUM_ACTIONS, n), 'rew': rew, 'done': done}
 
 
 def make_learner(model):
-    learner = object.__new__(FL.LeagueLearner)
+    learner = object.__new__(AG.ImpalaAgent)
     learner.model = model
     learner.device = torch.device("cpu")
     learner.optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, eps=1e-5)
@@ -167,7 +165,7 @@ class SilParity(unittest.TestCase):
     def test_golden_memory_matches_frozen(self):
         for cap, uses, seed in ((4, 2, 0), (6, 3, 1), (3, 1, 2)):
             rng = np.random.default_rng(seed)
-            old, new = FrozenGoldenMemoryGPU(cap, uses, TRAJ, torch.device("cpu")), FL.GoldenMemoryGPU(cap, uses, TRAJ, torch.device("cpu"))
+            old, new = FrozenGoldenMemoryGPU(cap, uses, TRAJ, torch.device("cpu")), AG.GoldenMemoryGPU(cap, uses, TRAJ, torch.device("cpu"))
             for step in range(40):
                 t, opp = traj(rng, int(rng.integers(3, TRAJ + 4))), float(rng.integers(5, 45))
                 self.assertEqual(old.add(t, opp), new.add(t, opp), (seed, step))
@@ -186,24 +184,24 @@ class SilParity(unittest.TestCase):
 
     def test_update_sil_matches_frozen(self):
         torch.manual_seed(3)
-        m_old = FL.Net(32, 32)
-        m_new = FL.Net(32, 32)
+        m_old = AG.Net(32, 32)
+        m_new = AG.Net(32, 32)
         m_new.load_state_dict(m_old.state_dict())
         lo, ln = make_learner(m_old), make_learner(m_new)
         rng = np.random.default_rng(7)
-        gm = FL.GoldenMemoryGPU(6, 4, TRAJ, torch.device("cpu"))
+        gm = AG.GoldenMemoryGPU(6, 4, TRAJ, torch.device("cpu"))
         for i in range(5):
             gm.add(traj(rng, 8 + i), 20.0 + i)
         for step in range(3):
             np.random.seed(step)
             batch = gm.sample(3)
-            so, sn = frozen_update_sil_gpu(lo, batch), FL.LeagueLearner._update_sil_gpu(ln, batch)
+            so, sn = frozen_update_sil_gpu(lo, batch), AG.ImpalaAgent._update_sil_gpu(ln, batch)
             self.assertEqual(so.keys(), sn.keys())
             for k in so:
                 self.assertAlmostEqual(so[k], sn[k], delta=ATOL * max(1.0, abs(so[k])), msg=f"{k} step {step}")
             for (n, po), pn in zip(m_old.named_parameters(), m_new.parameters()):
                 self.assertTrue(torch.allclose(po, pn, atol=ATOL), f"param {n} step {step}")
-        self.assertTrue(batches_equal(None, FL.LeagueLearner._update_sil_gpu(ln, None)))
+        self.assertTrue(batches_equal(None, AG.ImpalaAgent._update_sil_gpu(ln, None)))
 
 
 if __name__ == "__main__":
