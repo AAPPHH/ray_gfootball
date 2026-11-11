@@ -397,6 +397,7 @@ class SelfPlayCore:
         self.opp_prev_act, self.opp_first = NO_ACTION, True
         self.obs = self.feat = self.state = None
         self.prev_act, self.first = NO_ACTION, True
+        self.greedy = False
         self.ep_ret = 0.0
         self.ep_len = 0
         self.ep_score = [0, 0]
@@ -458,7 +459,7 @@ class SelfPlayCore:
         goal_trajectories = []
         game_over = False
         for _ in range(self.rollout_len):
-            act, lp, _, self.state = self.agent.act(self.obs, self.feat, self.prev_act, self.first, self.state)
+            act, lp, _, self.state = self.agent.act(self.obs, self.feat, self.prev_act, self.first, self.state, self.greedy)
             step_rec = {'obs': self.obs.copy(), 'feat': self.feat.copy(), 'prev_act': self.prev_act, 'act': act, 'lp': lp}
             for k, v in step_rec.items():
                 data[k].append(v)
@@ -533,9 +534,10 @@ class SelfPlayCore:
 SelfPlayWorker = ray.remote(num_cpus=1)(SelfPlayCore)
 
 class EvalCore(SelfPlayCore):
-    def __init__(self, spec: dict, rollout_len: int, threads: int):
+    def __init__(self, spec: dict, rollout_len: int, threads: int, greedy: bool = False):
         torch.set_num_threads(threads)
         super().__init__(-1, spec, rollout_len)
+        self.greedy = greedy
 
     def evaluate(self, weights: dict, bot: str, games: int) -> List[dict]:
         self.set_weights(weights)
@@ -552,7 +554,7 @@ class EvalRunner:
         if invalid:
             raise ValueError(f"eval.bots {invalid} not allowed, only built-in bots {list(BUILTIN_BOTS)}")
         self.cfg, self.out_path = cfg, Path(out_path)
-        self.make = lambda: Evaluator.options(**cfg["actor"]).remote(spec, rollout_len, cfg["torch_threads"])
+        self.make = lambda: Evaluator.options(**cfg["actor"]).remote(spec, rollout_len, cfg["torch_threads"], cfg["greedy"])
         self.actors = {bot: self.make() for bot in cfg["bots"]} if cfg["every"] > 0 else {}
         self.refs, self.results, self.errors, self.meta = {}, {}, {}, None
         self.last = {}

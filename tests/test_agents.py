@@ -174,6 +174,23 @@ class Rollouts(unittest.TestCase):
             fe.FootballEnv.step = orig
 
 
+class EvalGreedy(unittest.TestCase):
+    def test_eval_core_passes_the_greedy_flag_to_each_agent(self):
+        self.assertIn("greedy", tr.CONFIG["eval"])
+        for kind in KINDS:
+            for greedy in (False, True):
+                with self.subTest(kind=kind, greedy=greedy):
+                    spec = small_spec(kind, 4)
+                    core = lg.EvalCore(spec, 4, 1, greedy)
+                    seen = []
+                    act = core.agent.act
+                    core.agent.act = lambda *a, **k: (seen.append(a[5] if len(a) > 5 else None), act(*a, **k))[1]
+                    core.set_weights(ag.make_agent(spec).weights())
+                    core.collect(EASY, "bot_easy")
+                    core.close()
+                    self.assertEqual(set(seen) - {None}, {greedy})
+
+
 class Updates(unittest.TestCase):
     def rollout(self, kind):
         core = lg.SelfPlayCore(0, small_spec(kind), 200, 8)

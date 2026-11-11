@@ -35,7 +35,7 @@ CONFIG = {
         model={
             "deter": 512, "hidden": 512, "units": 512, "stoch": 16, "discrete": 16, "layers": 2, "head_layers": 1, "unimix": 0.01,
             "bins": 255, "bin_lim": 20.0, "min_std": 0.1, "max_std": 1.0, "log_sigma_lim": (-5.0, 2.0), "repval_detach": True,
-            "free": 1.0, "horizon": 15, "lam": 0.95, "disc_horizon": 333, "ent": 3e-4, "act_unimix": 0.01, "eval_greedy": False,
+            "free": 1.0, "horizon": 15, "lam": 0.95, "disc_horizon": 333, "ent": 3e-4, "act_unimix": 0.01,
             "lr": 1e-4, "agc": 0.3, "pmin": 1e-3, "eps": 1e-20, "b1": 0.9, "b2": 0.999, "warmup": 1000, "slow_frac": 0.02,
             "ret_decay": 0.99, "ret_lo": 0.05, "ret_hi": 0.95, "max_nonfinite": 1000,
             "scales": {"dyn": 0.5, "rep": 0.1, "recon": 1.0, "rew": 1.0, "con": 1.0, "priv": 1.0, "policy": 1.0, "value": 1.0, "repval": 0.3},
@@ -45,7 +45,7 @@ CONFIG = {
             "trunc_decay": 0.99, "ens_boot": 0.8, "ens_graph": False,
         },
     ),
-    "eval": {"every": 50, "games": 50, "bots": ["bot_easy", "bot_medium", "bot_hard"], "file": "eval.jsonl", "torch_threads": 1,
+    "eval": {"every": 50, "greedy": False, "games": 50, "bots": ["bot_easy", "bot_medium", "bot_hard"], "file": "eval.jsonl", "torch_threads": 1,
              "actor": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}},
     "bc": {"epochs": 20, "batch_size": 512, "lr": 1e-3},
     "train_seconds": 24 * 3600,
