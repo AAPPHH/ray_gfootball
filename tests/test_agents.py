@@ -1,4 +1,6 @@
+import contextlib
 import copy
+import io
 import math
 import os
 import sys
@@ -154,8 +156,12 @@ class Rollouts(unittest.TestCase):
                 core.close()
                 self.assertEqual(r["obs"].shape, (12, fe.OBS_DIM))
                 self.assertEqual(r["feat"].shape, (12, fe.FEATURE_DIM))
-                self.assertEqual(r["next_obs"].shape, (12, fe.OBS_DIM))
-                self.assertEqual(r["first"][0], 1.0)
+                self.assertEqual({"first", "trunc", "next_obs", "next_feat"} <= set(r), kind == "dreamer")
+                self.assertEqual(ag.make_agent(small_spec(kind, 12)).rollout_fields == (), kind == "impala")
+                if kind == "dreamer":
+                    self.assertEqual(r["next_obs"].shape, (12, fe.OBS_DIM))
+                    self.assertEqual(r["first"][0], 1.0)
+                    self.assertEqual(r["trunc"].sum(), 0.0)
                 self.assertTrue(((r["act"] >= 0) & (r["act"] < fe.NUM_ACTIONS)).all())
                 self.assertEqual(r["wid"], 0)
 
@@ -267,12 +273,35 @@ class Updates(unittest.TestCase):
         stats = learner.update([r])
         self.assertEqual([k for k in tr.CONFIG["dreamer"]["log_keys"] if k not in stats], [])
 
+    def test_dreamer_game_end_at_the_step_limit_is_truncation_and_a_real_end_is_terminal(self):
+        for trunc, term in ((1.0, 0.0), (0.0, 1.0)):
+            learner = learner_for("dreamer")
+            n = 4
+            r = {"wid": 0, "obs": np.ones((n, fe.OBS_DIM), np.float32), "feat": np.ones((n, fe.FEATURE_DIM), np.float32), "act": np.arange(n),
+                 "next_obs": np.ones((n, fe.OBS_DIM), np.float32), "next_feat": np.ones((n, fe.FEATURE_DIM), np.float32),
+                 "rew": np.zeros(n, np.float32), "done": np.array([0, 0, 0, 1], np.float32), "trunc": np.array([0, 0, 0, trunc], np.float32), "first": np.array([1, 0, 0, 0], np.float32)}
+            learner.observe(r)
+            learner.observe({**r, "done": np.zeros(n, np.float32), "trunc": np.zeros(n, np.float32)})
+            d = learner.replay.data
+            self.assertEqual(d["term"][0, :n + 1, 0].tolist(), [0] * n + [term])
+            self.assertEqual(d["first"][0, n + 1, 0], 1.0)
+
+    def test_core_marks_a_done_at_the_step_limit_as_truncated(self):
+        for ep_len, trunc in ((fe.GAME_STEPS - 1, 1.0), (10, 0.0)):
+            core = lg.SelfPlayCore(0, small_spec("dreamer", 3), 3, 4)
+            core.collect(EASY, "bot_easy")
+            core.ep_len = ep_len
+            core.env.step = lambda a, f=core.env.step: (*f(a)[:5], True)
+            r = core.collect(EASY, "bot_easy")
+            core.close()
+            self.assertEqual((r["done"].tolist(), r["trunc"].tolist()), ([1.0], [trunc]))
+
     def test_dreamer_replay_holds_terminal_records_and_carries_reward(self):
         learner = learner_for("dreamer")
         n = 6
         r = {"wid": 0, "obs": np.ones((n, fe.OBS_DIM), np.float32), "feat": np.ones((n, fe.FEATURE_DIM), np.float32), "act": np.arange(n),
              "next_obs": np.full((n, fe.OBS_DIM), 2, np.float32), "next_feat": np.full((n, fe.FEATURE_DIM), 2, np.float32),
-             "rew": np.array([0, 0, 1, 0, 0, 1], np.float32), "done": np.array([0, 0, 0, 0, 0, 1], np.float32), "first": np.array([1, 0, 0, 0, 0, 0], np.float32)}
+             "rew": np.array([0, 0, 1, 0, 0, 1], np.float32), "done": np.array([0, 0, 0, 0, 0, 1], np.float32), "first": np.array([1, 0, 0, 0, 0, 0], np.float32), "trunc": np.zeros(n, np.float32)}
         learner.observe(r)
         d = learner.replay.data
         self.assertEqual(int(learner.replay.n[0]), n + 1)
@@ -347,6 +376,26 @@ class Stop(Exception):
 
 
 class TrainerLoop(unittest.TestCase):
+    def test_progress_line_shows_the_windowed_goal_difference_for_each_agent(self):
+        old = tr.ray, lg.ray, tr.SelfPlayWorker
+        tr.ray = lg.ray = FakeRay()
+        tr.SelfPlayWorker = FakeWorkerClass()
+        try:
+            for kind in KINDS:
+                cfg = small_cfg(kind)
+                cfg["paths"]["checkpoint_dir"] = tempfile.mkdtemp()
+                cfg.update(eval={**cfg["eval"], "every": 0})
+                t = tr.LeagueTrainer(cfg)
+                t.start = 0.0
+                t.goal_diffs.extend([2, -1, 0, 1])
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    t._log_progress({"model_updates": 1.0, "train_ratio_eff": 1.0, **{k: 0.0 for k in ("loss", "pi", "v", "ent", "rho", "rho_max", "ev", "grad", "grad_clip")}})
+                t.close()
+                self.assertIn("GD:+0.50", buf.getvalue())
+        finally:
+            tr.ray, lg.ray, tr.SelfPlayWorker = old
+
     def test_trainer_runs_updates_checkpoints_and_resumes_with_each_agent(self):
         old = tr.ray, lg.ray, tr.SelfPlayWorker
         tr.ray = lg.ray = FakeRay()

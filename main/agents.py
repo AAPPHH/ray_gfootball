@@ -273,6 +273,7 @@ class GoldenMemoryGPU(GoldenMemory):
 
 class Agent:
     kind = None
+    rollout_fields = ()
 
     def attach(self, league):
         self.league = league
@@ -483,6 +484,7 @@ class ImpalaAgent(Agent):
 
 class DreamerAgent(Agent):
     kind = "dreamer"
+    rollout_fields = ("first", "trunc", "next_obs", "next_feat")
 
     def __init__(self, spec: dict, learner: bool = False):
         self.spec, self.learner, self.warmstarted = spec, learner, False
@@ -533,7 +535,7 @@ class DreamerAgent(Agent):
             self.replay.add(e, {"obs": x[i], "priv": zero_priv, "act": acts[i], "rew": rew_in, "first": r['first'][i], "term": 0.0})
             rew_in = r['rew'][i]
             if r['done'][i]:
-                self.replay.add(e, {"obs": nx[i], "priv": zero_priv, "act": zero_act, "rew": rew_in, "first": 0.0, "term": 1.0})
+                self.replay.add(e, {"obs": nx[i], "priv": zero_priv, "act": zero_act, "rew": rew_in, "first": 0.0, "term": 1.0 - r['trunc'][i]})
                 rew_in = 0.0
         self.carry[e] = rew_in
         self.env_steps += n

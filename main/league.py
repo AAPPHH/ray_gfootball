@@ -11,7 +11,7 @@ import torch
 import trueskill
 import ray
 from agents import make_agent
-from football_env import BOT_CONFIGS, BOT_ENVS, BUILTIN_BOTS, FEATURE_DIM, NO_ACTION, NUM_ACTIONS, OBS_DIM, SELFPLAY_ENV, FootballEnv, goal_event
+from football_env import BOT_CONFIGS, BOT_ENVS, BUILTIN_BOTS, FEATURE_DIM, NO_ACTION, NUM_ACTIONS, OBS_DIM, SELFPLAY_ENV, GAME_STEPS, FootballEnv, goal_event
 
 trueskill.setup(backend='mpmath')
 TS_ENV = trueskill.TrueSkill(mu=25.0, sigma=8.333, beta=4.166, tau=0.083, draw_probability=0.05)
@@ -453,7 +453,8 @@ class SelfPlayCore:
         if env_changed or self.obs is None:
             self._reset()
         is_selfplay = right > 0
-        keys = ['obs', 'feat', 'prev_act', 'act', 'lp', 'first', 'next_obs', 'next_feat', 'rew', 'done']
+        extra = self.agent.rollout_fields
+        keys = ['obs', 'feat', 'prev_act', 'act', 'lp', 'rew', 'done', *extra]
         data = {k: [] for k in keys}
         episodes = []
         goal_trajectories = []
@@ -464,13 +465,15 @@ class SelfPlayCore:
             for k, v in step_rec.items():
                 data[k].append(v)
                 self.rolling[k].append(v)
-            data['first'].append(float(self.first))
+            if 'first' in extra:
+                data['first'].append(float(self.first))
             self.first = False
             self.prev_act = act
             env_action = [act, self._get_opponent_action()] if is_selfplay else [act]
             self.obs, self.feat, self.opp_obs, self.opp_feat, rew, done = self.env.step(env_action)
-            data['next_obs'].append(self.obs.copy())
-            data['next_feat'].append(self.feat.copy())
+            if 'next_obs' in extra:
+                data['next_obs'].append(self.obs.copy())
+                data['next_feat'].append(self.feat.copy())
             self.ep_ret += rew
             self.ep_len += 1
             event = goal_event(rew)
@@ -498,6 +501,8 @@ class SelfPlayCore:
                     buf.clear()
             data['rew'].append(rew)
             data['done'].append(float(done))
+            if 'trunc' in extra:
+                data['trunc'].append(float(done and self.ep_len >= GAME_STEPS))
             if done:
                 game_over = True
                 episodes.append({
@@ -508,7 +513,7 @@ class SelfPlayCore:
                 self._reset()
                 break
         _, _, bootstrap, _ = self.agent.act(self.obs, self.feat, self.prev_act, self.first, self.state)
-        return {
+        out = {
             'obs': np.array(data['obs'], dtype=np.float32),
             'feat': np.array(data['feat'], dtype=np.float32),
             'prev_act': np.array(data['prev_act'], dtype=np.int64),
@@ -516,9 +521,6 @@ class SelfPlayCore:
             'lp': np.array(data['lp'], dtype=np.float32),
             'rew': np.array(data['rew'], dtype=np.float32),
             'done': np.array(data['done'], dtype=np.float32),
-            'first': np.array(data['first'], dtype=np.float32),
-            'next_obs': np.array(data['next_obs'], dtype=np.float32),
-            'next_feat': np.array(data['next_feat'], dtype=np.float32),
             'wid': self.wid,
             'bootstrap': bootstrap,
             'episodes': episodes,
@@ -526,6 +528,8 @@ class SelfPlayCore:
             'opponent_type': opponent_type,
             'goal_trajectories': goal_trajectories
         }
+        out.update({k: np.array(data[k], dtype=np.float32) for k in extra})
+        return out
 
     def close(self):
         if self.env is not None:

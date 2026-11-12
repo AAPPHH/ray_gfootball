@@ -13,6 +13,7 @@ BUILTIN_BOTS = ("bot_easy", "bot_medium", "bot_hard")
 SELFPLAY_ENV = "11_vs_11_stochastic"
 FEATURE_DIM, OBS_DIM, NUM_ACTIONS = 93, 115, 19
 NO_ACTION = NUM_ACTIONS
+GAME_STEPS = 3000
 
 
 def goal_event(rew: float) -> int:
