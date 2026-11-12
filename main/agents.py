@@ -273,7 +273,6 @@ class GoldenMemoryGPU(GoldenMemory):
 
 class Agent:
     kind = None
-    strict = True
 
     def attach(self, league):
         self.league = league
@@ -285,7 +284,7 @@ class Agent:
         return {k: v.detach().cpu().numpy() for k, v in self.policy_state().items()}
 
     def set_weights(self, weights: dict):
-        self.model.load_state_dict({k: torch.from_numpy(v.copy()) for k, v in weights.items()}, strict=self.strict)
+        self.model.load_state_dict({k: torch.from_numpy(v.copy()) for k, v in weights.items()}, strict=True)
 
     def save_snapshot(self, path):
         torch.save({'model': self.policy_state(), 'agent': self.kind}, path)
@@ -306,10 +305,13 @@ class Agent:
         raise NotImplementedError
 
     def save(self, path, extra: dict):
-        raise NotImplementedError
+        torch.save({'model': self.model.state_dict(), 'optimizer': self.opt.state_dict(), 'agent': self.kind, **extra}, path)
 
     def load(self, path) -> dict:
-        raise NotImplementedError
+        ckpt = self.read_checkpoint(path)
+        self.model.load_state_dict(ckpt['model'])
+        self.opt.load_state_dict(ckpt['optimizer'])
+        return ckpt
 
     def read_checkpoint(self, path) -> dict:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
@@ -476,19 +478,11 @@ class ImpalaAgent(Agent):
         gm = self.golden.stats()
         return f"VT L:{stats['loss']:.2f} p:{stats['pi']:+.3f} v:{stats['v']:.2f} H:{stats['ent']:.2f} rho:{stats['rho']:.1f}/{stats['rho_max']:.1f} EV:{stats['ev']:.2f} | {exp_str} | {sil_str} | GM:{gm['size']}({gm['fresh']}) | grad:{stats['grad']:.1f}->{stats['grad_clip']:.1f}"
 
-    def save(self, path, extra: dict):
-        torch.save({'model': self.model.state_dict(), 'optimizer': self.optimizer.state_dict(), 'agent': self.kind, **extra}, path)
-
-    def load(self, path) -> dict:
-        ckpt = self.read_checkpoint(path)
-        self.model.load_state_dict(ckpt['model'])
-        self.optimizer.load_state_dict(ckpt['optimizer'])
-        return ckpt
+    opt = property(lambda self: self.optimizer)
 
 
 class DreamerAgent(Agent):
     kind = "dreamer"
-    strict = False
 
     def __init__(self, spec: dict, learner: bool = False):
         self.spec, self.learner, self.warmstarted = spec, learner, False
@@ -565,14 +559,7 @@ class DreamerAgent(Agent):
     def fmt(self, stats: dict) -> str:
         return "DR " + " ".join(f"{k}:{stats[k]:.3g}" for k in self.spec["log_keys"] if k in stats) + f" upd:{int(stats['model_updates'])} ratio:{stats['train_ratio_eff']:.3g}/{self.spec['train_ratio']} replay:{int(self.replay.n.sum())}"
 
-    def save(self, path, extra: dict):
-        torch.save({'model': self.model.state_dict(), 'optimizer': self.model.opt.state_dict(), 'agent': self.kind, **extra}, path)
-
-    def load(self, path) -> dict:
-        ckpt = self.read_checkpoint(path)
-        self.model.load_state_dict(ckpt['model'])
-        self.model.opt.load_state_dict(ckpt['optimizer'])
-        return ckpt
+    opt = property(lambda self: self.model.opt)
 
 
 class ExpertDataset(Dataset):
