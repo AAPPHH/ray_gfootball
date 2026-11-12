@@ -9,6 +9,7 @@ import unittest
 import warnings
 from pathlib import Path
 import numpy as np
+import pyarrow.parquet as pq
 import torch
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -428,6 +429,26 @@ class TrainerLoop(unittest.TestCase):
                     again.close()
         finally:
             tr.ray, lg.ray, tr.SelfPlayWorker = old
+
+
+class ExpertGeneration(unittest.TestCase):
+    def test_short_game_loads_through_bc_and_expert_buffer(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = str(Path(d) / "expert.parquet")
+            report = tr.run({"mode": "gen_expert", "expert_gen": {"games": 1, "keep": "all", "max_steps": 150, "workers": 0, "out": out}})
+            self.assertEqual((report["kept_games"], report["kept_rows"], report["inferred_action_fraction"]), (1, 150, 0.0))
+            self.assertAlmostEqual(sum(report["action_hist"].values()), 1.0, places=3)
+            table = pq.read_table(out)
+            self.assertEqual(set(table.column_names), set(fe.ExpertGenerator.COLUMNS))
+            self.assertEqual(len(np.frombuffer(table["obs"][0].as_py(), dtype=np.float32)), fe.OBS_DIM)
+            self.assertTrue(0 <= min(table["action"].to_pylist()) and max(table["action"].to_pylist()) < fe.NUM_ACTIONS)
+            buf = ag.ExpertBufferGPU(out, torch.device("cpu"), 64)
+            self.assertEqual((buf.num_episodes, len(buf.obs)), (1, 150))
+            self.assertEqual(buf.sample(2)["obs"].shape[-1], fe.OBS_DIM)
+            save = str(Path(d) / "bc.pt")
+            with contextlib.redirect_stdout(io.StringIO()):
+                model, _ = ag.BCWarmstart(small_spec("impala"), out, save, epochs=1, batch_size=32).run()
+            self.assertTrue(Path(save).exists())
 
 
 if __name__ == "__main__":

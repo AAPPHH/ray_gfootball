@@ -1,4 +1,9 @@
+from collections import Counter
+from pathlib import Path
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+import ray
 import gfootball.env as football_env
 
 BOT_CONFIGS = [
@@ -144,3 +149,121 @@ class FootballEnv:
     def close(self):
         self.env.close()
 
+
+
+class ExpertTeacher:
+    DIRS = (5, 4, 3, 2, 1, 8, 7, 6)
+    SHOT, SHORT_PASS, SPRINT, RELEASE_SPRINT, SLIDE = 12, 11, 13, 15, 16
+
+    def __init__(self, cfg: dict):
+        self.cfg, self.sprinting, self.cooldown = cfg, False, 0
+
+    def reset(self):
+        self.sprinting, self.cooldown = False, 0
+
+    def direction(self, delta) -> int:
+        if np.abs(delta).max() < self.cfg["deadzone"]:
+            return 0
+        return self.DIRS[int(np.round(np.arctan2(-delta[1], delta[0]) / (np.pi / 4))) % 8]
+
+    def act(self, obs: np.ndarray) -> int:
+        c = self.cfg
+        self.cooldown = max(self.cooldown - 1, 0)
+        me = int(np.argmax(obs[97:108]))
+        left, right, ball = obs[0:22].reshape(11, 2), obs[44:66].reshape(11, 2), obs[88:90]
+        owner, pos = int(np.argmax(obs[94:97])) - 1, left[me]
+        d_ball, d_goal = np.linalg.norm(ball - pos), np.linalg.norm(np.array([1.0, 0.0]) - ball)
+        if owner == 0 and d_ball < c["own_ball_dist"]:
+            if d_goal < c["shot_dist"] or (ball[0] > c["shot_x"] and abs(ball[1]) < c["shot_y"]):
+                return self.SHOT
+            pressed = np.linalg.norm(right - pos, axis=1).min() < c["press_dist"]
+            mates = [i for i in range(11) if i != me and left[i][0] > pos[0] and np.linalg.norm(left[i] - pos) < c["pass_dist"]]
+            if pressed and mates and d_goal > c["shot_dist"]:
+                return self.SHORT_PASS
+            return self.direction(np.array([1.0, 0.0]) - ball)
+        if owner == 1 and d_ball < c["slide_dist"] and not self.cooldown:
+            self.cooldown = c["slide_cooldown"]
+            return self.SLIDE
+        far = d_ball > c["sprint_dist"]
+        if far != self.sprinting:
+            self.sprinting = far
+            return self.SPRINT if far else self.RELEASE_SPRINT
+        return self.direction(ball - pos)
+
+
+class ExpertGenerator:
+    COLUMNS = ("obs", "action", "reward", "active", "episode_id", "step", "score")
+
+    def __init__(self, cfg: dict):
+        self.cfg, self.teacher, self.envs = cfg, ExpertTeacher(cfg["teacher"]), {}
+
+    def play(self, episode_id: int, opponent: str) -> dict:
+        env = self.envs.setdefault(opponent, FootballEnv(BOT_ENVS[opponent], 1, 0))
+        self.teacher.reset()
+        obs = env.reset()[0]
+        rows, goals, done = [], [0, 0], False
+        while not done and len(rows) < self.cfg["max_steps"]:
+            action = self.teacher.act(obs)
+            nxt, _, _, _, rew, done = env.step([action])
+            event = goal_event(rew)
+            goals[event < 0] += abs(event)
+            rows.append((obs.tobytes(), action, float(event > 0), int(np.argmax(obs[97:108])), episode_id, len(rows)))
+            obs = nxt
+        return {"opponent": opponent, "episode_id": episode_id, "goals_for": goals[0], "goals_against": goals[1], "rows": rows}
+
+    @staticmethod
+    def keep(cfg: dict, game: dict) -> bool:
+        return cfg["keep"] == "all" or game["goals_for"] > game["goals_against"]
+
+    def games(self, ids) -> list:
+        opponents = self.cfg["opponents"]
+        return [self.play(i, opponents[i % len(opponents)]) for i in ids]
+
+    def close(self):
+        for env in self.envs.values():
+            env.close()
+        self.envs = {}
+
+    @staticmethod
+    def table(games: list) -> pa.Table:
+        cols = {k: [] for k in ExpertGenerator.COLUMNS}
+        for g in games:
+            for row in g["rows"]:
+                for k, v in zip(ExpertGenerator.COLUMNS, (*row, g["goals_for"])):
+                    cols[k].append(v)
+        types = {"obs": pa.binary(), "action": pa.int64(), "reward": pa.float32(), "active": pa.int64(), "episode_id": pa.int64(), "step": pa.int64(), "score": pa.int64()}
+        return pa.table({k: pa.array(v, type=types[k]) for k, v in cols.items()})
+
+    @staticmethod
+    def report(games: list, kept: list, inferred_fraction: float = 0.0) -> dict:
+        hist = Counter(r[1] for g in kept for r in g["rows"])
+        total = max(sum(hist.values()), 1)
+        return {
+            "games": [(g["episode_id"], g["opponent"], g["goals_for"], g["goals_against"], len(g["rows"])) for g in games],
+            "kept_games": len(kept), "kept_rows": total if hist else 0,
+            "win_rate": sum(g["goals_for"] > g["goals_against"] for g in games) / max(len(games), 1),
+            "goal_diff_mean": float(np.mean([g["goals_for"] - g["goals_against"] for g in games])) if games else 0.0,
+            "action_hist": {a: round(hist[a] / total, 4) for a in range(NUM_ACTIONS)},
+            "inferred_action_fraction": inferred_fraction,
+        }
+
+
+ExpertGenWorker = ray.remote(num_cpus=1, memory=2 * 1024 ** 3)(ExpertGenerator)
+
+
+def generate_expert(cfg: dict) -> dict:
+    out = Path(cfg["out"])
+    ids = list(range(cfg["games"]))
+    if cfg["workers"] > 0:
+        workers = [ExpertGenWorker.options(**cfg["ray_worker"]).remote(cfg) for _ in range(cfg["workers"])]
+        games = [g for part in ray.get([w.games.remote(ids[i::cfg["workers"]]) for i, w in enumerate(workers)]) for g in part]
+        for w in workers:
+            ray.kill(w)
+    else:
+        gen = ExpertGenerator(cfg)
+        games = gen.games(ids)
+        gen.close()
+    kept = [g for g in games if ExpertGenerator.keep(cfg, g)]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(ExpertGenerator.table(kept), out)
+    return ExpertGenerator.report(games, kept)

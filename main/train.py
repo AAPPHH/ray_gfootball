@@ -9,11 +9,13 @@ import torch
 import ray
 import actor_critic
 from agents import VTRACE, BCWarmstart, make_agent
+from football_env import generate_expert
 from league import TS_ENV, EvalRunner, PureLeague, SelfPlayWorker, StickyDispatcher
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 GIB = 1024 ** 3
+GF_DATA = "/tmp/claude-1005/-home-john-tinywhoop-bc-racing/a3574b03-9a09-436a-8c5e-cf180ed5b823/scratchpad/gf_data"
 GF_RUNS = "/tmp/claude-1005/-home-john-tinywhoop-bc-racing/a3574b03-9a09-436a-8c5e-cf180ed5b823/scratchpad/gf_runs"
 CONFIG = {
     "agent": "impala",
@@ -49,6 +51,11 @@ CONFIG = {
     ),
     "eval": {"every": 50, "greedy": False, "games": 50, "bots": ["bot_easy", "bot_medium", "bot_hard"], "file": "eval.jsonl", "torch_threads": 1,
              "actor": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}},
+    "expert_gen": {
+        "games": 80, "opponents": ["bot_easy"], "keep": "win", "max_steps": 3000, "workers": 0, "out": GF_DATA + "/expert.parquet",
+        "ray_worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB},
+        "teacher": {"deadzone": 0.01, "own_ball_dist": 0.03, "shot_dist": 0.3, "shot_x": 0.7, "shot_y": 0.2, "press_dist": 0.1, "pass_dist": 0.4, "slide_dist": 0.05, "slide_cooldown": 60, "sprint_dist": 0.25},
+    },
     "bc": {"epochs": 20, "batch_size": 512, "lr": 1e-3},
     "train_seconds": 24 * 3600,
     "log_every": 10,
@@ -262,6 +269,13 @@ def run(overrides: dict = None):
     if cfg["mode"] == "bc":
         BCWarmstart(agent_spec({**cfg, "agent": "impala"}), cfg["paths"]["expert_parquet"], cfg["paths"]["warmstart"], **cfg["bc"]).run()
         return
+    if cfg["mode"] == "gen_expert":
+        gen = cfg["expert_gen"]
+        if gen["workers"] > 0:
+            ray_init(cfg)
+        report = generate_expert(gen)
+        print(json.dumps(report))
+        return report
     ray_init(cfg)
     error = free_cpu_error(cfg)
     if error:
