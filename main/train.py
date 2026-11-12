@@ -122,7 +122,7 @@ class LeagueTrainer:
         self._resume(cfg["resume"])
         self.workers = [SelfPlayWorker.options(**cfg["ray"]["worker"]).remote(i, self.spec, self.rollout_len, l["goal_traj_len"]) for i in range(self.num_workers)]
         self.start = None
-        self.ep_wins, self.ep_draws, self.ep_losses, self.returns, self.lengths, self.returns_vs_hard = (deque(maxlen=100) for _ in range(6))
+        self.ep_wins, self.ep_draws, self.ep_losses, self.returns, self.lengths, self.returns_vs_hard, self.goal_diffs = (deque(maxlen=100) for _ in range(7))
         self.pending, self.queue = {}, []
         self._weights_at = (None, None)
         self.evaluator = EvalRunner(cfg["eval"], self.spec, self.rollout_len, self.checkpoint_dir / cfg["eval"]["file"])
@@ -171,6 +171,7 @@ class LeagueTrainer:
         n_eps = max(len(self.ep_wins), 1)
         win_rate, draw_rate, loss_rate = (sum(d) / n_eps * 100 for d in (self.ep_wins, self.ep_draws, self.ep_losses))
         ret = np.mean(list(self.returns)) if self.returns else 0
+        gd = np.mean(list(self.goal_diffs)) if self.goal_diffs else 0.0
         ret_max = np.max(list(self.returns)) if self.returns else 0
         avg_vs_hard = np.mean(list(self.returns_vs_hard)) if len(self.returns_vs_hard) >= 10 else 0
         league_stats = self.league.get_stats()
@@ -178,7 +179,7 @@ class LeagueTrainer:
         games_str = "/".join(f"{n.replace('bot_', '')[0]}{g}" for n, g in league_stats['games_by_opp'].items()) + f"/s{league_stats['snap_games']}"
         opp_str = " ".join(self._opp_col(tag, bot_stats.get(name, {})) for tag, name in (("E", "bot_easy"), ("M", "bot_medium"), ("H", "bot_hard")))
         champ = league_stats['champion'] or "none"
-        print(f"[{self.updates:4d}] {self.total_steps/1e6:.1f}M {sps/1e3:.0f}k/s {mpm:.0f}m/min {elapsed/60:.0f}m | W/D/L:{win_rate:.0f}/{draw_rate:.0f}/{loss_rate:.0f}% R:{ret:+.1f}({ret_max:+.0f}) | mu={self.current_rating.mu:.1f} sigma={self.current_rating.sigma:.2f} | {opp_str} N:{games_str} RvH:{avg_vs_hard:+.1f} | {self.agent.fmt(stats)} | {league_stats['num_snapshots']}snap champ:{champ}")
+        print(f"[{self.updates:4d}] {self.total_steps/1e6:.1f}M {sps/1e3:.0f}k/s {mpm:.0f}m/min {elapsed/60:.0f}m | W/D/L:{win_rate:.0f}/{draw_rate:.0f}/{loss_rate:.0f}% R:{ret:+.1f}({ret_max:+.0f}) GD:{gd:+.2f} | mu={self.current_rating.mu:.1f} sigma={self.current_rating.sigma:.2f} | {opp_str} N:{games_str} RvH:{avg_vs_hard:+.1f} | {self.agent.fmt(stats)} | {league_stats['num_snapshots']}snap champ:{champ}")
 
     def _ingest(self, ref):
         w, opponent_name = self.pending.pop(ref)
@@ -189,6 +190,7 @@ class LeagueTrainer:
             self.total_matches += 1
             self.returns.append(ep['return'])
             self.lengths.append(ep['length'])
+            self.goal_diffs.append(ep['goals_scored'] - ep['goals_conceded'])
             for d, hit in ((self.ep_wins, ep['won']), (self.ep_draws, ep['drawn'] and not ep['won']), (self.ep_losses, not ep['won'] and not ep['drawn'])):
                 d.append(int(hit))
             if opponent_name == "bot_hard":
