@@ -19,10 +19,8 @@ from football_env import FEATURE_DIM, NO_ACTION, NUM_ACTIONS, OBS_DIM, FeatureEn
 VTRACE = {"rho_bar": 1.0, "c_bar": 1.0, "log_rho_clip": 20.0, "adv_sigma_norm": False, "value_loss_form": "mse"}
 DREAMER_POLICY_KEYS = ("enc", "rssm", "actor")
 
-
 def prefixed(stats: Optional[dict], prefix: str) -> dict:
     return {prefix + k: v for k, v in stats.items()} if stats else {}
-
 
 def explained_variance(values: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor = None) -> float:
     values, targets = values.reshape(-1), targets.reshape(-1)
@@ -321,7 +319,6 @@ class Agent:
             raise ValueError(f"checkpoint {path} was written by agent {found!r}, current agent is {self.kind!r}; use a separate checkpoint_dir per agent")
         return ckpt
 
-
 class ImpalaAgent(Agent):
     kind = "impala"
     vtrace = dict(VTRACE)
@@ -337,7 +334,7 @@ class ImpalaAgent(Agent):
         self.batch_size, self.gamma = spec["batch_size"], spec["gamma"]
         self.entropy_coeff, self.value_coeff, self.sil_coeff = spec["entropy_coeff"], spec["value_coeff"], spec["sil_coeff"]
         self.expert_threshold, self.expert_min_games, self.expert_disabled = spec["expert_threshold"], spec["expert_min_games"], False
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(spec["device"])
         self.model.to(self.device)
         warm = spec.get("warmstart")
         if warm and Path(warm).exists():
@@ -481,7 +478,6 @@ class ImpalaAgent(Agent):
 
     opt = property(lambda self: self.optimizer)
 
-
 class DreamerAgent(Agent):
     kind = "dreamer"
     rollout_fields = ("first", "trunc", "next_obs", "next_feat")
@@ -563,7 +559,6 @@ class DreamerAgent(Agent):
 
     opt = property(lambda self: self.model.opt)
 
-
 class ExpertDataset(Dataset):
     def __init__(self, parquet_path):
         df = pq.read_table(parquet_path).to_pandas()
@@ -578,12 +573,11 @@ class ExpertDataset(Dataset):
     def __getitem__(self, idx):
         return {'obs': torch.from_numpy(self.obs[idx]).float(), 'feat': torch.from_numpy(self.feat[idx]).float(), 'action': torch.tensor(self.actions[idx]).long()}
 
-
 class BCWarmstart:
     def __init__(self, spec: dict, parquet_path: str, save_path: str, epochs: int = 20, batch_size: int = 512, lr: float = 1e-3):
         self.spec, self.parquet_path, self.save_path = spec, parquet_path, save_path
         self.epochs, self.batch_size, self.lr = epochs, batch_size, lr
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(spec["device"])
 
     def _epoch(self, model, loader, optimizer=None):
         model.train(optimizer is not None)
@@ -623,9 +617,7 @@ class BCWarmstart:
         print(f"best val acc {best:.1f}% saved to {self.save_path}")
         return model, val_acc
 
-
 AGENTS = {"impala": ImpalaAgent, "dreamer": DreamerAgent}
-
 
 def make_agent(spec: dict, learner: bool = False) -> Agent:
     if spec["agent"] not in AGENTS:

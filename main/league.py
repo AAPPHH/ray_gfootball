@@ -34,7 +34,6 @@ def summarize_games(episodes: List[dict]) -> dict:
     return {'n': n, 'win': wins, 'draw': draws, 'loss': n - wins - draws, 'win_rate': wins / n if n else 0.0, 'ci_lo': lo, 'ci_hi': hi,
             'goal_diff': float(np.mean([e['goals_scored'] - e['goals_conceded'] for e in episodes])) if n else 0.0}
 
-
 @dataclass
 class LeagueMember:
     name: str

@@ -33,10 +33,8 @@ CONFIG = {
     },
 }
 
-
 class SmokeDone(Exception):
     pass
-
 
 class BoundedRay:
     def __init__(self, ray, call_timeout, poll, deadline):
@@ -59,7 +57,6 @@ class BoundedRay:
             if time.time() > min(stall, self._deadline):
                 raise TimeoutError(f"no rollout within {self._call_timeout}s or past the {CONFIG['timeout_s']}s limit")
 
-
 def make_trainer_class(state):
     import train
 
@@ -77,7 +74,6 @@ def make_trainer_class(state):
             return stats
 
     return SmokeTrainer
-
 
 def run():
     import copy
@@ -132,7 +128,6 @@ def run():
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary))
     return 0 if summary["ok"] else 1
-
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

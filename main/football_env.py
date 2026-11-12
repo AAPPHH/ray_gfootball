@@ -20,14 +20,11 @@ FEATURE_DIM, OBS_DIM, NUM_ACTIONS = 93, 115, 19
 NO_ACTION = NUM_ACTIONS
 GAME_STEPS = 3000
 
-
 def goal_event(rew: float) -> int:
     return 1 if rew > 0.5 else -1 if rew < -0.5 else 0
 
-
 def raw_obs(x) -> np.ndarray:
     return np.array(x).flatten()[:OBS_DIM].astype(np.float32)
-
 
 class FeatureEngineer:
     GOAL = np.array([1.0, 0.0], dtype=np.float32)
@@ -149,8 +146,6 @@ class FootballEnv:
     def close(self):
         self.env.close()
 
-
-
 class ExpertTeacher:
     DIRS = (5, 4, 3, 2, 1, 8, 7, 6)
     SHOT, SHORT_PASS, SPRINT, RELEASE_SPRINT, SLIDE = 12, 11, 13, 15, 16
@@ -190,15 +185,19 @@ class ExpertTeacher:
             return self.SPRINT if far else self.RELEASE_SPRINT
         return self.direction(ball - pos)
 
-
 class ExpertGenerator:
     COLUMNS = ("obs", "action", "reward", "active", "episode_id", "step", "score")
 
     def __init__(self, cfg: dict):
+        unknown = [o for o in cfg["opponents"] if o not in BOT_ENVS or o in ("random", "lazy")]
+        if unknown:
+            raise ValueError(f"unsupported opponents {unknown}")
         self.cfg, self.teacher, self.envs = cfg, ExpertTeacher(cfg["teacher"]), {}
 
     def play(self, episode_id: int, opponent: str) -> dict:
-        env = self.envs.setdefault(opponent, FootballEnv(BOT_ENVS[opponent], 1, 0))
+        if opponent not in self.envs:
+            self.envs[opponent] = FootballEnv(BOT_ENVS[opponent], 1, 0)
+        env = self.envs[opponent]
         self.teacher.reset()
         obs = env.reset()[0]
         rows, goals, done = [], [0, 0], False
@@ -247,23 +246,28 @@ class ExpertGenerator:
             "inferred_action_fraction": inferred_fraction,
         }
 
-
 ExpertGenWorker = ray.remote(num_cpus=1, memory=2 * 1024 ** 3)(ExpertGenerator)
-
 
 def generate_expert(cfg: dict) -> dict:
     out = Path(cfg["out"])
     ids = list(range(cfg["games"]))
     if cfg["workers"] > 0:
         workers = [ExpertGenWorker.options(**cfg["ray_worker"]).remote(cfg) for _ in range(cfg["workers"])]
-        games = [g for part in ray.get([w.games.remote(ids[i::cfg["workers"]]) for i, w in enumerate(workers)]) for g in part]
-        for w in workers:
-            ray.kill(w)
+        try:
+            games = [g for part in ray.get([w.games.remote(ids[i::cfg["workers"]]) for i, w in enumerate(workers)]) for g in part]
+            ray.get([w.close.remote() for w in workers])
+        finally:
+            for w in workers:
+                ray.kill(w)
     else:
         gen = ExpertGenerator(cfg)
-        games = gen.games(ids)
-        gen.close()
+        try:
+            games = gen.games(ids)
+        finally:
+            gen.close()
     kept = [g for g in games if ExpertGenerator.keep(cfg, g)]
+    if not kept:
+        raise ValueError("no games kept; refusing to write an empty parquet")
     out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(ExpertGenerator.table(kept), out)
     return ExpertGenerator.report(games, kept)

@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 import copy
@@ -15,12 +16,12 @@ from league import TS_ENV, EvalRunner, PureLeague, SelfPlayWorker, StickyDispatc
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 GIB = 1024 ** 3
-GF_DATA = "/tmp/claude-1005/-home-john-tinywhoop-bc-racing/a3574b03-9a09-436a-8c5e-cf180ed5b823/scratchpad/gf_data"
-GF_RUNS = "/tmp/claude-1005/-home-john-tinywhoop-bc-racing/a3574b03-9a09-436a-8c5e-cf180ed5b823/scratchpad/gf_runs"
+GF_DATA = os.environ.get("GF_DATA", str(ROOT / "data"))
+GF_RUNS = os.environ.get("GF_RUNS", str(ROOT / "runs"))
 CONFIG = {
     "agent": "impala",
     "mode": "train",
-    "paths": {"warmstart": str(ROOT / "bc_warmstart_v2.pt"), "expert_parquet": str(HERE / "expert.parquet"), "checkpoint_dir": "./checkpoints_league_v77"},
+    "paths": {"warmstart": str(ROOT / "bc_warmstart_v2.pt"), "expert_parquet": GF_DATA + "/expert.parquet", "checkpoint_dir": "./checkpoints_league_v77"},
     "min_free_cpus": 8,
     "ray": {"address": "auto", "namespace": None, "worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}, "env_vars": {"OMP_NUM_THREADS": "1"}},
     "learner": dict(
@@ -29,12 +30,12 @@ CONFIG = {
         bot_floor=0.25, latest_snapshot_prob=0.5, min_skill_spacing=3.0, min_policy_distance=0.02,
     ),
     "impala": dict(
-        lr=0.0001, gamma=0.999, entropy_coeff=0.01, value_coeff=0.2, sil_coeff=0.5,
+        device="cpu", lr=0.0001, gamma=0.999, entropy_coeff=0.01, value_coeff=0.2, sil_coeff=0.5,
         d_model=512, lstm_hidden=512, expert_threshold=0.7, expert_min_games=20,
         golden_capacity=2048, golden_max_uses=5, vtrace=dict(VTRACE),
     ),
     "dreamer": dict(
-        batch=16, T=64, replay_cap=1_000_000, prefill=20_000, train_ratio=16, max_updates=None, seed=0, device="auto",
+        batch=16, T=64, replay_cap=1_000_000, prefill=20_000, train_ratio=16, max_updates=None, seed=0, device="cpu",
         log_keys=["dyn", "rep", "recon", "rew", "con", "policy", "value", "repval", "actor_entropy", "ret_mean", "v_ev", "adv_std"],
         model={
             "deter": 512, "hidden": 512, "units": 512, "stoch": 16, "discrete": 16, "layers": 2, "head_layers": 1, "unimix": 0.01,
@@ -64,7 +65,6 @@ CONFIG = {
     "resume": None,
 }
 
-
 CPU_TRY = {
     "agent": "dreamer", "train_seconds": 1800, "min_free_cpus": 8,
     "paths": {"checkpoint_dir": GF_RUNS, "warmstart": None, "expert_parquet": None},
@@ -75,12 +75,10 @@ CPU_TRY = {
     "eval": {"every": 0}, "log_every": 5, "checkpoint_every": 25,
 }
 
-
 def deep_merge(base: dict, over: dict) -> dict:
     for k, v in over.items():
         base[k] = deep_merge(base[k], v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v
     return base
-
 
 def agent_spec(cfg: dict) -> dict:
     kind, paths, l = cfg["agent"], cfg["paths"], cfg["learner"]
@@ -89,19 +87,16 @@ def agent_spec(cfg: dict) -> dict:
         spec.update(warmstart=paths["warmstart"], expert_parquet=paths["expert_parquet"])
     return spec
 
-
 def ray_init(cfg: dict):
     r = cfg["ray"]
     ray.init(address=r["address"], namespace=r["namespace"], ignore_reinit_error=True, logging_level="WARNING",
              runtime_env={"py_modules": [str(Path(actor_critic.__file__).resolve().parent)], "working_dir": str(HERE),
                           "excludes": ["__pycache__", "*.pt", "*.parquet"], "env_vars": r["env_vars"]})
 
-
-def free_cpu_error(cfg: dict):
-    need = max(cfg["min_free_cpus"], cfg["learner"]["num_workers"] * cfg["ray"]["worker"]["num_cpus"])
+def free_cpu_error(cfg: dict, need: int = None):
+    need = need or max(cfg["min_free_cpus"], cfg["learner"]["num_workers"] * cfg["ray"]["worker"]["num_cpus"])
     free = ray.available_resources().get("CPU", 0)
     return f"insufficient CPU on the shared Ray cluster: {free} available, {need} needed; not started" if free < need else None
-
 
 class LeagueTrainer:
     def __init__(self, cfg: dict):
@@ -262,7 +257,6 @@ class LeagueTrainer:
                 pass
             ray.kill(w)
 
-
 def run(overrides: dict = None):
     cfg = deep_merge(copy.deepcopy(CONFIG), overrides or {})
     torch.set_num_threads(cfg["learner"]["driver_threads"])
@@ -273,6 +267,10 @@ def run(overrides: dict = None):
         gen = cfg["expert_gen"]
         if gen["workers"] > 0:
             ray_init(cfg)
+            error = free_cpu_error(cfg, gen["workers"] + 1)
+            if error:
+                ray.shutdown()
+                raise SystemExit(error)
         report = generate_expert(gen)
         print(json.dumps(report))
         return report
@@ -288,7 +286,6 @@ def run(overrides: dict = None):
         print("\nStopped!")
     finally:
         trainer.close()
-
 
 if __name__ == "__main__":
     run(json.loads(sys.argv[1]) if len(sys.argv) > 1 else None)
