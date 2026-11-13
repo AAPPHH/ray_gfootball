@@ -56,7 +56,7 @@ A high-performance reinforcement learning system for Google Research Football th
 - **Strong Opponent Filter**: Prevents games against obsolete weak snapshots
 
 ### 2. IMPALA with V-Trace
-- Off-policy actor-critic with importance sampling correction
+- Off-policy actor critic with importance sampling correction
 - Clipped importance weights (ρ̄=1.0, c̄=1.0)
 - Handles asynchronous weight updates gracefully
 

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "main"))
 import agents as AG
 import football_env as FE
-from actor_critic.impala import compute_vtrace, impala_targets
+from deep_rl_architectures.impala import compute_vtrace, impala_targets
 
 ATOL = 1e-6
 CFG = {"gamma": 0.999, "rho_bar": 1.0, "c_bar": 1.0, "log_rho_clip": 20.0, "adv_sigma_norm": False, "value_loss_form": "mse"}

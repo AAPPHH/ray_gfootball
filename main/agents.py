@@ -10,10 +10,10 @@ import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
 from torch.distributions import Categorical
 from torch.utils.data import DataLoader, Dataset
-from actor_critic import dreamer as DR
-from actor_critic.dreamer_core import Replay
-from actor_critic.impala import PopArtAdapter, impala_loss, impala_targets
-from actor_critic.sil import GoldenMemory, sil_clipped_step, sil_mc_returns
+from deep_rl_architectures import dreamer as DR
+from deep_rl_architectures.dreamer_core import Replay
+from deep_rl_architectures.impala import PopArtAdapter, impala_loss, impala_targets
+from deep_rl_architectures.sil import GoldenMemory, sil_clipped_step, sil_mc_returns
 from football_env import FEATURE_DIM, NO_ACTION, NUM_ACTIONS, OBS_DIM, FeatureEngineer
 
 VTRACE = {"rho_bar": 1.0, "c_bar": 1.0, "log_rho_clip": 20.0, "adv_sigma_norm": False, "value_loss_form": "mse"}

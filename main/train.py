@@ -8,7 +8,7 @@ from collections import deque
 import numpy as np
 import torch
 import ray
-import actor_critic
+import deep_rl_architectures
 from agents import VTRACE, BCWarmstart, make_agent
 from football_env import generate_expert
 from league import TS_ENV, EvalRunner, PureLeague, SelfPlayWorker, StickyDispatcher
@@ -90,7 +90,7 @@ def agent_spec(cfg: dict) -> dict:
 def ray_init(cfg: dict):
     r = cfg["ray"]
     ray.init(address=r["address"], namespace=r["namespace"], ignore_reinit_error=True, logging_level="WARNING",
-             runtime_env={"py_modules": [str(Path(actor_critic.__file__).resolve().parent)], "working_dir": str(HERE),
+             runtime_env={"py_modules": [str(Path(deep_rl_architectures.__file__).resolve().parent)], "working_dir": str(HERE),
                           "excludes": ["__pycache__", "*.pt", "*.parquet"], "env_vars": r["env_vars"]})
 
 def free_cpu_error(cfg: dict, need: int = None):
