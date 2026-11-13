@@ -23,6 +23,7 @@ CONFIG = {
     "mode": "train",
     "paths": {"warmstart": str(ROOT / "bc_warmstart_v2.pt"), "expert_parquet": GF_DATA + "/expert.parquet", "checkpoint_dir": "./checkpoints_league_v77"},
     "min_free_cpus": 8,
+    "env": {"rewards": "scoring"},
     "ray": {"address": "auto", "namespace": None, "worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}, "env_vars": {"OMP_NUM_THREADS": "1"}},
     "learner": dict(
         num_workers=28, rollout_len=512, batch_size=64, goal_traj_len=128, driver_threads=4,
@@ -75,6 +76,22 @@ CPU_TRY = {
     "eval": {"every": 0}, "log_every": 5, "checkpoint_every": 25,
 }
 
+GFB = {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB, "resources": {"gfootball": 1}}
+GPU_COMMON = {
+    "paths": {"checkpoint_dir": GF_RUNS, "warmstart": None, "expert_parquet": None},
+    "env": {"rewards": "scoring,checkpoints"},
+    "ray": {"address": os.environ.get("RAY_ADDRESS", "auto"), "worker": dict(GFB, resources=dict(GFB["resources"])), "env_vars": {"OMP_NUM_THREADS": "1"}},
+    "eval": {"every": 50, "games": 30, "bots": ["bot_easy", "bot_medium", "bot_hard"], "actor": dict(GFB, resources=dict(GFB["resources"]))},
+    "expert_gen": {"ray_worker": dict(GFB, resources=dict(GFB["resources"]))},
+    "checkpoint_every": 50, "log_every": 10,
+}
+GPU_E0 = copy.deepcopy(GPU_COMMON)
+GPU_E0.update({"agent": "impala", "learner": {"num_workers": 16}, "impala": {"device": "cuda"}})
+GPU_D0 = copy.deepcopy(GPU_COMMON)
+GPU_D0.update({"agent": "dreamer", "learner": {"num_workers": 12},
+               "dreamer": {"device": "cuda", "train_ratio": 32, "replay_cap": 1_000_000, "prefill": 20_000, "model": {"units": 512, "deter": 512, "hidden": 512}}})
+RUNS = {"CPU_TRY": CPU_TRY, "GPU_E0": GPU_E0, "GPU_D0": GPU_D0}
+
 def deep_merge(base: dict, over: dict) -> dict:
     for k, v in over.items():
         base[k] = deep_merge(base[k], v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v
@@ -94,9 +111,13 @@ def ray_init(cfg: dict):
                           "excludes": ["__pycache__", "*.pt", "*.parquet"], "env_vars": r["env_vars"]})
 
 def free_cpu_error(cfg: dict, need: int = None):
-    need = need or max(cfg["min_free_cpus"], cfg["learner"]["num_workers"] * cfg["ray"]["worker"]["num_cpus"])
-    free = ray.available_resources().get("CPU", 0)
-    return f"insufficient CPU on the shared Ray cluster: {free} available, {need} needed; not started" if free < need else None
+    worker = cfg["ray"]["worker"]
+    key = next(iter(worker.get("resources") or {}), "CPU")
+    unit = worker["resources"][key] if key != "CPU" else worker["num_cpus"]
+    evals = len(cfg["eval"]["bots"]) * cfg["eval"]["actor"].get("resources", {}).get(key, 1) if cfg["eval"]["every"] > 0 and key != "CPU" else 0
+    need = need or max(cfg["min_free_cpus"], cfg["learner"]["num_workers"] * unit + evals)
+    free = ray.available_resources().get(key, 0)
+    return f"insufficient {key} on the shared Ray cluster: {free} available, {need} needed; not started" if free < need else None
 
 class LeagueTrainer:
     def __init__(self, cfg: dict):
@@ -129,7 +150,7 @@ class LeagueTrainer:
         self._weights_at = (None, None)
         self.evaluator = EvalRunner(cfg["eval"], self.spec, self.rollout_len, self.checkpoint_dir / cfg["eval"]["file"])
         self.dispatcher = StickyDispatcher(self.league, ["random", "lazy", "bot_easy", "bot_medium", "bot_hard"])
-        print(f"{cfg['agent']} + PFSP League | {self.num_workers}W | batch {self.batch_size} x {self.rollout_len} | mu={self.current_rating.mu:.1f}")
+        print(f"{cfg['agent']} + PFSP League | rewards={cfg['env']['rewards']} | {self.num_workers}W | batch {self.batch_size} x {self.rollout_len} | mu={self.current_rating.mu:.1f}")
 
     def _resume(self, resume):
         path = max(self.checkpoint_dir.glob("ckpt_*.pt"), key=lambda p: p.stat().st_mtime, default=None) if resume == "latest" else resume
@@ -147,7 +168,7 @@ class LeagueTrainer:
 
     def _dispatch(self, w, game_over: bool = True):
         opponent, env_config, opp_type, opp_weights = self.dispatcher.assign(self.workers.index(w), game_over, self.current_rating)
-        self.pending[w.collect.remote(env_config, opp_type, opp_weights)] = (w, opponent)
+        self.pending[w.collect.remote(env_config, opp_type, opp_weights, self.cfg["env"]["rewards"])] = (w, opponent)
 
     def _update(self, batch: list) -> dict:
         return self.agent.update(batch)
@@ -288,4 +309,7 @@ def run(overrides: dict = None):
         trainer.close()
 
 if __name__ == "__main__":
-    run(json.loads(sys.argv[1]) if len(sys.argv) > 1 else None)
+    over = copy.deepcopy(RUNS[os.environ["GF_RUN"]]) if os.environ.get("GF_RUN") else {}
+    if os.environ.get("GF_TRAIN_SECONDS"):
+        over["train_seconds"] = int(os.environ["GF_TRAIN_SECONDS"])
+    run(deep_merge(over, json.loads(sys.argv[1])) if len(sys.argv) > 1 else over)

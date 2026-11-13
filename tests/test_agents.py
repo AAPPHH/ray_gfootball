@@ -129,6 +129,35 @@ class TryConfig(unittest.TestCase):
         agent = ag.make_agent(tr.agent_spec(cfg), learner=True)
         self.assertLessEqual(sum(a.nbytes for a in agent.replay.data.values()), 200 * 1024 ** 2)
 
+    def test_gpu_configs_resolve_and_every_actor_needs_gfootball(self):
+        for name, kind, workers in (("GPU_E0", "impala", 16), ("GPU_D0", "dreamer", 12)):
+            with self.subTest(name):
+                cfg = tr.deep_merge(copy.deepcopy(tr.CONFIG), copy.deepcopy(tr.RUNS[name]))
+                self.assertEqual((cfg["agent"], cfg["learner"]["num_workers"], cfg[kind]["device"]), (kind, workers, "cuda"))
+                self.assertIsNone(cfg["paths"]["warmstart"])
+                self.assertIsNone(cfg["paths"]["expert_parquet"])
+                self.assertEqual((cfg["eval"]["every"], cfg["eval"]["games"], cfg["checkpoint_every"]), (50, 30, 50))
+                self.assertEqual(cfg["env"]["rewards"], "scoring,checkpoints")
+                for opts in (cfg["ray"]["worker"], cfg["eval"]["actor"], cfg["expert_gen"]["ray_worker"]):
+                    self.assertEqual(opts["resources"], {"gfootball": 1})
+                    self.assertEqual(opts["num_gpus"], 0)
+                self.assertEqual(cfg["ray"]["env_vars"]["OMP_NUM_THREADS"], "1")
+                tr.agent_spec(cfg)
+
+    def test_free_check_reads_gfootball_resource(self):
+        class Pool:
+            def available_resources(self):
+                return {"CPU": 1000, "gfootball": 18}
+        old = tr.ray
+        try:
+            tr.ray = Pool()
+            cfg = tr.deep_merge(copy.deepcopy(tr.CONFIG), copy.deepcopy(tr.GPU_E0))
+            self.assertIn("gfootball", tr.free_cpu_error(cfg))
+            tr.ray = type("P", (), {"available_resources": lambda s: {"CPU": 0, "gfootball": 19}})()
+            self.assertIsNone(tr.free_cpu_error(cfg))
+        finally:
+            tr.ray = old
+
     def test_free_cpu_check_blocks_a_start_on_a_busy_cluster(self):
         class Busy:
             def __init__(self, cpus):
