@@ -76,7 +76,7 @@ def make_learner_class(fl, state):
 def run():
     import ray
     import torch
-    import actor_critic
+    import deep_rl_architectures
     import full_league as fl
     out = Path(CONFIG["out_dir"])
     shutil.rmtree(out, ignore_errors=True)
@@ -88,7 +88,7 @@ def run():
     fl.CONFIG["eval"].update(CONFIG["eval"])
     fl.CONFIG["ray"].update({"address": CONFIG["ray"]["address"], "worker": CONFIG["ray"]["worker"]})
     ray.init(address=CONFIG["ray"]["address"], namespace=CONFIG["ray"]["namespace"], ignore_reinit_error=True, logging_level="WARNING",
-             runtime_env={"py_modules": [str(Path(actor_critic.__file__).resolve().parent)], "working_dir": str(HERE), "excludes": ["__pycache__", "smoke_out"],
+             runtime_env={"py_modules": [str(Path(deep_rl_architectures.__file__).resolve().parent)], "working_dir": str(HERE), "excludes": ["__pycache__", "smoke_out"],
                           "env_vars": {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}})
     learner = None
     need = max(CONFIG["min_free_cpus"], CONFIG["learner"]["num_workers"] * CONFIG["ray"]["worker"]["num_cpus"])

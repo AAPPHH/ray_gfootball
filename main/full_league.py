@@ -16,8 +16,8 @@ import trueskill
 import pyarrow.parquet as pq
 import ray
 import gfootball.env as football_env
-from actor_critic.impala import PopArtAdapter, impala_loss, impala_targets
-from actor_critic.sil import GoldenMemory, sil_clipped_step, sil_mc_returns
+from deep_rl_architectures.impala import PopArtAdapter, impala_loss, impala_targets
+from deep_rl_architectures.sil import GoldenMemory, sil_clipped_step, sil_mc_returns
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = {
