@@ -1,8 +1,6 @@
 from collections import Counter
-from pathlib import Path
 import numpy as np
 import pyarrow as pa
-import pyarrow.parquet as pq
 import ray
 import gfootball.env as football_env
 
@@ -248,8 +246,7 @@ class ExpertGenerator:
 
 ExpertGenWorker = ray.remote(num_cpus=1, memory=2 * 1024 ** 3)(ExpertGenerator)
 
-def generate_expert(cfg: dict) -> dict:
-    out = Path(cfg["out"])
+def generate_expert(cfg: dict) -> tuple:
     ids = list(range(cfg["games"]))
     if cfg["workers"] > 0:
         workers = [ExpertGenWorker.options(**cfg["ray_worker"]).remote(cfg) for _ in range(cfg["workers"])]
@@ -267,7 +264,5 @@ def generate_expert(cfg: dict) -> dict:
             gen.close()
     kept = [g for g in games if ExpertGenerator.keep(cfg, g)]
     if not kept:
-        raise ValueError("no games kept; refusing to write an empty parquet")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(ExpertGenerator.table(kept), out)
-    return ExpertGenerator.report(games, kept)
+        raise ValueError("no games kept; refusing to write an empty dataset")
+    return ExpertGenerator.table(kept), ExpertGenerator.report(games, kept)

@@ -3,7 +3,6 @@ import time
 from pathlib import Path
 from typing import Optional
 import numpy as np
-import pyarrow.parquet as pq
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,6 +13,7 @@ from deep_rl_architectures import dreamer as DR
 from deep_rl_architectures.dreamer_core import Replay
 from deep_rl_architectures.impala import PopArtAdapter, impala_loss, impala_targets
 from deep_rl_architectures.sil import GoldenMemory, sil_clipped_step, sil_mc_returns
+from store import read_table
 from football_env import FEATURE_DIM, NO_ACTION, NUM_ACTIONS, OBS_DIM, FeatureEngineer
 
 VTRACE = {"rho_bar": 1.0, "c_bar": 1.0, "log_rho_clip": 20.0, "adv_sigma_norm": False, "value_loss_form": "mse"}
@@ -120,19 +120,18 @@ class Net(nn.Module):
         return actions, dist.log_prob(actions), self.value.denormalize(values_norm), hidden
 
 class ExpertBufferGPU:
-    def __init__(self, parquet_path: str, device: torch.device, window_len: int = 512):
+    def __init__(self, source, device: torch.device, window_len: int = 512):
         self.device = device
         self.window_len = window_len
         self.num_episodes = 0
         self.episode_slices = []
         self.window_slices = []
         self.obs = self.feat = self.act = self.rew = self.done = self.prev_act = None
-        if parquet_path and Path(parquet_path).exists():
-            self._load_parquet(parquet_path)
+        self._load(source)
 
-    def _load_parquet(self, parquet_path):
-        print(f"Loading expert data to GPU from {parquet_path}...")
-        df = pq.read_table(parquet_path).to_pandas()
+    def _load(self, source):
+        print(f"Loading expert data to GPU from {source}...")
+        df = read_table(source).to_pandas()
         obs_all = np.array([np.frombuffer(b, dtype=np.float32) for b in df['obs']])
         actions = df['action'].values.astype(np.int64)
         rewards = df['reward'].values.astype(np.float32)
@@ -337,14 +336,19 @@ class ImpalaAgent(Agent):
         self.device = torch.device(spec["device"])
         self.model.to(self.device)
         warm = spec.get("warmstart")
-        if warm and Path(warm).exists():
+        if warm:
+            if not Path(warm).is_file():
+                raise FileNotFoundError(f"warmstart {warm} not found")
             print(f"Loading warmstart from {warm}...")
-            self.model.load_state_dict(torch.load(warm, map_location=self.device, weights_only=False)['model'], strict=False)
+            try:
+                self.model.load_state_dict(torch.load(warm, map_location=self.device, weights_only=False)['model'], strict=True)
+            except (RuntimeError, KeyError) as e:
+                raise ValueError(f"warmstart {warm} does not match the network (d_model={spec['d_model']}, lstm_hidden={spec['lstm_hidden']}): {str(e)[:300]}") from e
             self.warmstarted = True
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=spec["lr"], eps=1e-5)
         self.scaler = GradScaler('cuda')
-        parquet = spec.get("expert_parquet")
-        self.expert = ExpertBufferGPU(parquet, self.device, spec["rollout_len"]) if parquet else None
+        expert = spec.get("expert")
+        self.expert = ExpertBufferGPU(expert, self.device, spec["rollout_len"]) if expert else None
         self.golden = GoldenMemoryGPU(spec["golden_capacity"], spec["golden_max_uses"], spec["goal_traj_len"], self.device)
 
     def act(self, obs, feat, prev_act, first, state, deterministic=False):
@@ -560,8 +564,8 @@ class DreamerAgent(Agent):
     opt = property(lambda self: self.model.opt)
 
 class ExpertDataset(Dataset):
-    def __init__(self, parquet_path):
-        df = pq.read_table(parquet_path).to_pandas()
+    def __init__(self, source):
+        df = read_table(source).to_pandas()
         self.obs = np.array([np.frombuffer(b, dtype=np.float32) for b in df['obs']])
         self.actions = df['action'].values.astype(np.int64)
         self.active = df['active'].values.astype(np.int64)
@@ -574,8 +578,8 @@ class ExpertDataset(Dataset):
         return {'obs': torch.from_numpy(self.obs[idx]).float(), 'feat': torch.from_numpy(self.feat[idx]).float(), 'action': torch.tensor(self.actions[idx]).long()}
 
 class BCWarmstart:
-    def __init__(self, spec: dict, parquet_path: str, save_path: str, epochs: int = 20, batch_size: int = 512, lr: float = 1e-3):
-        self.spec, self.parquet_path, self.save_path = spec, parquet_path, save_path
+    def __init__(self, spec: dict, source, save_path, epochs: int = 20, batch_size: int = 512, lr: float = 1e-3, log=None):
+        self.spec, self.source, self.save_path, self.log = spec, source, save_path, log
         self.epochs, self.batch_size, self.lr = epochs, batch_size, lr
         self.device = torch.device(spec["device"])
 
@@ -598,7 +602,7 @@ class BCWarmstart:
         return loss_sum / total, correct / total * 100
 
     def run(self):
-        dataset = ExpertDataset(self.parquet_path)
+        dataset = ExpertDataset(self.source)
         n_train = int(len(dataset) * 0.9)
         train_set, val_set = torch.utils.data.random_split(dataset, [n_train, len(dataset) - n_train])
         train_loader = DataLoader(train_set, batch_size=self.batch_size, shuffle=True, num_workers=0)
@@ -611,6 +615,8 @@ class BCWarmstart:
             with torch.no_grad():
                 val_loss, val_acc = self._epoch(model, val_loader)
             print(f"{epoch+1:3d} train {tr_loss:.4f}/{tr_acc:.1f}% val {val_loss:.4f}/{val_acc:.1f}%")
+            if self.log:
+                self.log({"epoch": epoch + 1, "train_loss": tr_loss, "train_acc": tr_acc, "val_loss": val_loss, "val_acc": val_acc})
             if val_acc > best:
                 best = val_acc
                 torch.save({'model': model.state_dict(), 'val_acc': val_acc, 'epoch': epoch + 1}, self.save_path)
