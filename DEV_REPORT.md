@@ -1,3 +1,5 @@
+> Lake-Hinweis: Alle Läufe, Expert-Daten und BC-Warmstarts liegen jetzt im Datalake (`lake/`, siehe README), Workflow `gen_expert` -> `bc` -> `train`; `eval.jsonl`, `checkpoint_dir`, `GF_DATA`/`GF_RUNS` und `bc_warmstart_v2.pt` als Pfad entfallen (Warmstart `lake:bc`, Expert `lake:expert`). Ein konfigurierter Warmstart/Expert, der nicht aufgelöst werden kann oder nicht zur Architektur passt, bricht den Start ab.
+>
 > Layout-Hinweis: `full_league.py` und `weckick_im.py` sind auf dem Branch dev-modular in `football_env.py`, `league.py`, `agents.py` (inkl. `BCWarmstart`) und `train.py` aufgeteilt; `LeagueLearner` ist `train.LeagueTrainer`. Die Abschnitte unten beschreiben den Stand vor der Aufteilung.
 
 # Bericht: Konvergenz-Fixes auf der dev-Branch
@@ -201,9 +203,9 @@ Aktive Pipeline danach: `main/league.py`/`main/train.py` (Training),
 
 ## 6. Risiken / nächste Schritte
 
-- **Stiller Start ohne Warmstart:** Existiert das `warmstart_path`-File
-  nicht, startet der Learner kommentarlos from scratch (kein Fehler, keine
-  Warnung). Nach Netz-Umbauten daran denken, `BCWarmstart` in `agents.py` neu laufen zu
+- **Stiller Start ohne Warmstart (behoben):** Ein konfigurierter, aber fehlender oder
+  inkompatibler Warmstart/Expert bricht den Start jetzt mit einem Fehler ab; `None` schaltet ihn
+  bewusst aus. Nach Netz-Umbauten daran denken, `BCWarmstart` in `agents.py` neu laufen zu
   lassen — durch den Import aus `league.py`/`train.py` (3.6) kann die Architektur
   selbst aber nicht mehr auseinanderlaufen.
 - **Sparse Reward + schwacher BC-Start:** Ohne Checkpoint-Reward hängt der
