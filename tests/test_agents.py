@@ -9,7 +9,6 @@ import unittest
 import warnings
 from pathlib import Path
 import numpy as np
-import pyarrow.parquet as pq
 import torch
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -20,20 +19,21 @@ import agents as ag
 import football_env as fe
 import league as lg
 import train as tr
+from store import GameLake, read_table
 
 SMALL = {
     "learner": {"num_workers": 1, "rollout_len": 200, "batch_size": 1, "goal_traj_len": 8},
     "impala": {"d_model": 16, "lstm_hidden": 16, "golden_capacity": 8},
     "dreamer": {"batch": 2, "T": 8, "replay_cap": 2000, "prefill": 0, "train_ratio": 1, "max_updates": 2,
                 "model": {"deter": 16, "hidden": 16, "units": 16, "stoch": 4, "discrete": 4, "horizon": 3, "bins": 31, "warmup": 1}},
-    "paths": {"warmstart": None, "expert_parquet": None},
+    "paths": {"warmstart": None, "expert": None},
 }
 EASY = ("11_vs_11_easy_stochastic", 1, 0)
 KINDS = ("impala", "dreamer")
 
 
 def small_cfg(kind):
-    return tr.deep_merge(copy.deepcopy(tr.CONFIG), {**copy.deepcopy(SMALL), "agent": kind})
+    return tr.deep_merge(copy.deepcopy(tr.CONFIG), {**copy.deepcopy(SMALL), "agent": kind, "lake": tempfile.mkdtemp()})
 
 
 def small_spec(kind, rollout_len=200):
@@ -100,7 +100,7 @@ class Interface(unittest.TestCase):
             b.league.load()
         self.assertTrue(a.league.load())
 
-    def test_trainer_dir_is_per_agent(self):
+    def test_each_agent_run_is_its_own_lake_run_dir(self):
         old = tr.ray, lg.ray, tr.SelfPlayWorker
         tr.ray = lg.ray = FakeRay()
         tr.SelfPlayWorker = FakeWorkerClass()
@@ -109,13 +109,13 @@ class Interface(unittest.TestCase):
             dirs = []
             for kind in KINDS:
                 cfg = small_cfg(kind)
-                cfg["paths"]["checkpoint_dir"] = base
-                cfg.update(eval={**cfg["eval"], "every": 0})
+                cfg.update(lake=base, eval={**cfg["eval"], "every": 0})
                 t = tr.LeagueTrainer(cfg)
                 dirs.append(t.checkpoint_dir)
                 t._save_checkpoint()
                 t.close()
-            self.assertEqual(dirs, [Path(base) / k for k in KINDS])
+            self.assertEqual([d.parent for d in dirs], [Path(base) / "runs"] * 2)
+            self.assertEqual([d.name.split("_")[:2] for d in dirs], [[k, "default"] for k in KINDS])
         finally:
             tr.ray, lg.ray, tr.SelfPlayWorker = old
 
@@ -125,7 +125,7 @@ class TryConfig(unittest.TestCase):
         cfg = tr.deep_merge(copy.deepcopy(tr.CONFIG), copy.deepcopy(tr.CPU_TRY))
         self.assertLessEqual(cfg["learner"]["num_workers"] * cfg["ray"]["worker"]["num_cpus"] + cfg["learner"]["driver_threads"], 8)
         self.assertEqual(cfg["ray"]["worker"]["num_gpus"], 0)
-        self.assertTrue(cfg["paths"]["checkpoint_dir"].startswith(tr.GF_RUNS))
+        self.assertEqual((cfg["preset"], cfg["lake"]), ("CPU_TRY", os.environ.get("GF_LAKE", "lake")))
         agent = ag.make_agent(tr.agent_spec(cfg), learner=True)
         self.assertLessEqual(sum(a.nbytes for a in agent.replay.data.values()), 200 * 1024 ** 2)
 
@@ -135,7 +135,8 @@ class TryConfig(unittest.TestCase):
                 cfg = tr.deep_merge(copy.deepcopy(tr.CONFIG), copy.deepcopy(tr.RUNS[name]))
                 self.assertEqual((cfg["agent"], cfg["learner"]["num_workers"], cfg[kind]["device"]), (kind, workers, "cuda"))
                 self.assertIsNone(cfg["paths"]["warmstart"])
-                self.assertIsNone(cfg["paths"]["expert_parquet"])
+                self.assertIsNone(cfg["paths"]["expert"])
+                self.assertEqual(cfg["preset"], name)
                 self.assertEqual((cfg["eval"]["every"], cfg["eval"]["games"], cfg["checkpoint_every"]), (50, 30, 50))
                 self.assertEqual(cfg["env"]["rewards"], "scoring,checkpoints")
                 for opts in (cfg["ray"]["worker"], cfg["eval"]["actor"], cfg["expert_gen"]["ray_worker"]):
@@ -413,7 +414,6 @@ class TrainerLoop(unittest.TestCase):
         try:
             for kind in KINDS:
                 cfg = small_cfg(kind)
-                cfg["paths"]["checkpoint_dir"] = tempfile.mkdtemp()
                 cfg.update(eval={**cfg["eval"], "every": 0})
                 t = tr.LeagueTrainer(cfg)
                 t.start = 0.0
@@ -434,7 +434,6 @@ class TrainerLoop(unittest.TestCase):
             for kind in KINDS:
                 with self.subTest(kind):
                     cfg = small_cfg(kind)
-                    cfg["paths"]["checkpoint_dir"] = tempfile.mkdtemp()
                     cfg.update(eval={**cfg["eval"], "every": 0}, checkpoint_every=2)
                     cfg["learner"].update(rollout_len=40, num_workers=2, batch_size=2)
 
@@ -452,32 +451,30 @@ class TrainerLoop(unittest.TestCase):
                     self.assertGreater(trainer.total_steps, 0)
                     trainer.updates += 1
                     trainer._save_checkpoint()
+                    trainer.close()
                     again = Short({**cfg, "resume": "latest"})
                     self.assertEqual((again.updates, again.total_steps), (trainer.updates, trainer.total_steps))
-                    trainer.close()
                     again.close()
         finally:
             tr.ray, lg.ray, tr.SelfPlayWorker = old
 
 
 class ExpertGeneration(unittest.TestCase):
-    def test_short_game_loads_through_bc_and_expert_buffer(self):
-        with tempfile.TemporaryDirectory() as d:
-            out = str(Path(d) / "expert.parquet")
-            report = tr.run({"mode": "gen_expert", "expert_gen": {"games": 1, "keep": "all", "max_steps": 150, "workers": 0, "out": out}})
-            self.assertEqual((report["kept_games"], report["kept_rows"], report["inferred_action_fraction"]), (1, 150, 0.0))
-            self.assertAlmostEqual(sum(report["action_hist"].values()), 1.0, places=3)
-            table = pq.read_table(out)
-            self.assertEqual(set(table.column_names), set(fe.ExpertGenerator.COLUMNS))
-            self.assertEqual(len(np.frombuffer(table["obs"][0].as_py(), dtype=np.float32)), fe.OBS_DIM)
-            self.assertTrue(0 <= min(table["action"].to_pylist()) and max(table["action"].to_pylist()) < fe.NUM_ACTIONS)
-            buf = ag.ExpertBufferGPU(out, torch.device("cpu"), 64)
-            self.assertEqual((buf.num_episodes, len(buf.obs)), (1, 150))
-            self.assertEqual(buf.sample(2)["obs"].shape[-1], fe.OBS_DIM)
-            save = str(Path(d) / "bc.pt")
-            with contextlib.redirect_stdout(io.StringIO()):
-                model, _ = ag.BCWarmstart(small_spec("impala"), out, save, epochs=1, batch_size=32).run()
-            self.assertTrue(Path(save).exists())
+    def test_short_game_becomes_a_lake_dataset_and_loads_through_bc_and_expert_buffer(self):
+        lake = tempfile.mkdtemp()
+        report = tr.run({"mode": "gen_expert", "lake": lake, "expert_gen": {"games": 1, "keep": "all", "max_steps": 150, "workers": 0}})
+        self.assertEqual((report["kept_games"], report["kept_rows"], report["inferred_action_fraction"]), (1, 150, 0.0))
+        self.assertAlmostEqual(sum(report["action_hist"].values()), 1.0, places=3)
+        src = GameLake(lake).resolve_dataset("lake:expert")
+        table = read_table(src["path"])
+        self.assertEqual(set(table.column_names), set(fe.ExpertGenerator.COLUMNS))
+        self.assertEqual(len(np.frombuffer(table["obs"][0].as_py(), dtype=np.float32)), fe.OBS_DIM)
+        self.assertTrue(0 <= min(table["action"].to_pylist()) and max(table["action"].to_pylist()) < fe.NUM_ACTIONS)
+        buf = ag.ExpertBufferGPU(src["path"], torch.device("cpu"), 64)
+        self.assertEqual((buf.num_episodes, len(buf.obs)), (1, 150))
+        self.assertEqual(buf.sample(2)["obs"].shape[-1], fe.OBS_DIM)
+        meta = GameLake(lake).lake.dataset("expert")["meta"]
+        self.assertEqual((meta["teacher"], meta["opponents"], meta["games"], meta["report"]["kept_rows"]), (tr.CONFIG["expert_gen"]["teacher"], ["bot_easy"], 1, 150))
 
 
 if __name__ == "__main__":

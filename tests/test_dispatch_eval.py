@@ -212,13 +212,13 @@ class FakeActor:
 
 
 class EvalRunnerFlow(unittest.TestCase):
-    def test_non_blocking_round_written_to_jsonl(self):
+    def test_non_blocking_round_written_to_sink(self):
         fake, old = FakeRay(), lg.ray
         lg.ray = fake
         try:
-            out = Path(tempfile.mkdtemp()) / "eval.jsonl"
+            out = []
             r = lg.EvalRunner.__new__(lg.EvalRunner)
-            r.cfg, r.out_path = {"every": 50, "games": 4, "bots": ["bot_easy", "bot_hard"]}, out
+            r.cfg, r.sink = {"every": 50, "games": 4, "bots": ["bot_easy", "bot_hard"]}, out.extend
             r.actors = {"bot_easy": FakeActor("a"), "bot_hard": FakeActor("b")}
             r.refs, r.results, r.errors, r.meta, r.last = {}, {}, {}, None, {}
             self.assertFalse(r.due(49))
@@ -228,12 +228,12 @@ class EvalRunnerFlow(unittest.TestCase):
             self.assertIsNone(r.poll())
             fake.ready.add("a")
             self.assertIsNone(r.poll())
-            self.assertFalse(out.exists())
+            self.assertFalse(out)
             fake.ready.add("b")
             rec = r.poll()
             self.assertEqual(rec["update"], 50)
             self.assertEqual(rec["bots"]["bot_hard"]["n"], 4)
-            self.assertEqual(json.loads(out.read_text())["bots"]["bot_easy"]["win"], 4)
+            self.assertEqual({(row["bot"], row["win"], row["update"]) for row in out}, {("bot_easy", 4, 50), ("bot_hard", 4, 50)})
             self.assertTrue(r.due(100))
             self.assertEqual(rec["errors"], {})
         finally:
@@ -243,9 +243,9 @@ class EvalRunnerFlow(unittest.TestCase):
         fake, old = FakeRay(), lg.ray
         lg.ray = fake
         try:
-            out = Path(tempfile.mkdtemp()) / "eval.jsonl"
+            out = []
             r = lg.EvalRunner.__new__(lg.EvalRunner)
-            r.cfg, r.out_path = {"every": 50, "games": 4, "bots": ["bot_easy", "bot_hard"]}, out
+            r.cfg, r.sink = {"every": 50, "games": 4, "bots": ["bot_easy", "bot_hard"]}, out.extend
             bad, spare = FakeActor("b"), FakeActor("c")
             bad.broken.add("b")
             r.actors = {"bot_easy": FakeActor("a"), "bot_hard": bad}
@@ -260,7 +260,7 @@ class EvalRunnerFlow(unittest.TestCase):
             self.assertNotIn("bot_hard", rec["bots"])
             self.assertIs(r.actors["bot_hard"], spare)
             self.assertEqual(fake.killed, ["b"])
-            self.assertEqual(json.loads(out.read_text())["n_errors"], 1)
+            self.assertEqual({row["bot"]: row.get("error") for row in out}, {"bot_easy": None, "bot_hard": "RuntimeError"})
             self.assertFalse(r.refs)
             self.assertTrue(r.due(100))
         finally:
@@ -270,13 +270,13 @@ class EvalRunnerFlow(unittest.TestCase):
 class EvalBotsValidation(unittest.TestCase):
     def test_only_builtin_bots_allowed(self):
         for bad in ("random", "lazy", "nope"):
-            cfg = {"every": 0, "games": 1, "bots": ["bot_easy", bad], "file": "e", "torch_threads": 1, "actor": {}}
+            cfg = {"every": 0, "games": 1, "bots": ["bot_easy", bad], "torch_threads": 1, "actor": {}}
             with self.assertRaises(ValueError):
-                lg.EvalRunner(cfg, SPEC, 8, Path(tempfile.mkdtemp()) / "e.jsonl")
+                lg.EvalRunner(cfg, SPEC, 8, None)
 
     def test_default_bots_accepted(self):
         cfg = {**tr.CONFIG["eval"], "every": 0}
-        self.assertEqual(lg.EvalRunner(cfg, SPEC, 8, Path(tempfile.mkdtemp()) / "e.jsonl").actors, {})
+        self.assertEqual(lg.EvalRunner(cfg, SPEC, 8, None).actors, {})
 
 
 if __name__ == "__main__":
