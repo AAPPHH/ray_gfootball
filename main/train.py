@@ -91,7 +91,14 @@ GPU_E0.update({"agent": "impala", "preset": "GPU_E0", "learner": {"num_workers":
 GPU_D0 = copy.deepcopy(GPU_COMMON)
 GPU_D0.update({"agent": "dreamer", "preset": "GPU_D0", "learner": {"num_workers": 12},
                "dreamer": {"device": "cuda", "train_ratio": 32, "replay_cap": 1_000_000, "prefill": 20_000, "model": {"units": 512, "deter": 512, "hidden": 512}}})
-RUNS = {"CPU_TRY": CPU_TRY, "GPU_E0": GPU_E0, "GPU_D0": GPU_D0}
+DGX_CPU = {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}
+DGX_EXPERT = {"mode": "gen_expert", "preset": "DGX_EXPERT", "expert_gen": {"games": 320, "opponents": ["bot_easy", "bot_medium"], "workers": 16, "ray_worker": dict(DGX_CPU)}}
+DGX_BC = {"mode": "bc", "preset": "DGX_BC", "paths": {"expert": "lake:expert"}, "impala": {"device": "cuda"}}
+DGX_E1 = {"agent": "impala", "preset": "DGX_E1", "train_seconds": 2 * 3600, "paths": {"warmstart": "lake:bc", "expert": "lake:expert"},
+          "env": {"rewards": "scoring"}, "ray": {"worker": dict(DGX_CPU)}, "learner": {"num_workers": 16},
+          "impala": {"device": "cuda", "lr": 3.5e-4, "gamma": 0.997, "value_coeff": 0.5},
+          "eval": {"every": 50, "games": 30, "actor": dict(DGX_CPU)}, "checkpoint_every": 50, "log_every": 10}
+RUNS = {"CPU_TRY": CPU_TRY, "GPU_E0": GPU_E0, "GPU_D0": GPU_D0, "DGX_EXPERT": DGX_EXPERT, "DGX_BC": DGX_BC, "DGX_E1": DGX_E1}
 
 def deep_merge(base: dict, over: dict) -> dict:
     for k, v in over.items():
