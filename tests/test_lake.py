@@ -20,7 +20,7 @@ import agents as ag
 import football_env as fe
 import league as lg
 import train as tr
-from store import GameLake
+from football_env import GameLake
 from test_agents import FakeRay, FakeWorker, FakeWorkerClass, Stop, small_cfg
 from test_dispatch_eval import FakeActor
 from test_dispatch_eval import FakeRay as EvalFakeRay
@@ -174,6 +174,93 @@ class Resume(Patched):
                 self.assertEqual((forked.updates, forked.run.meta["resume_source"]), (first.updates, ckpt))
                 forked.close()
 
+    def finished(self, lake, **over):
+        cfg = short_cfg("impala", lake, **over)
+        t = self.trainer(cfg, stop_at=3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            t.train(max_time=600)
+        t.close()
+        return cfg, t
+
+    def test_final_newer_than_last_periodic_checkpoint_wins(self):
+        cfg, t = self.finished(tempfile.mkdtemp())
+        self.assertEqual(t.updates, 3)
+        self.assertEqual(sorted(p.name for p in (t.run.run_dir / "checkpoints").glob("*.pt")), ["ckpt_2.pt", "final.pt"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            again = self.trainer({**cfg, "resume": t.run.run_id})
+        self.assertEqual((again.updates, Path(again.run.meta["resumes"][-1]["resume_source"]).name), (3, "final.pt"))
+        self.assertGreater(again.wall_offset, 0.0)
+        again.close()
+
+    def test_rejected_resume_leaves_run_meta_untouched(self):
+        cfg, t = self.finished(tempfile.mkdtemp())
+        before = (t.run.run_dir / "run_meta.json").read_text()
+        with self.assertRaises(ValueError):
+            tr.LeagueTrainer({**short_cfg("dreamer", cfg["lake"]), "resume": t.run.run_id})
+        self.assertEqual((t.run.run_dir / "run_meta.json").read_text(), before)
+
+    def test_resume_keeps_kind_and_original_sources(self):
+        lake = tempfile.mkdtemp()
+        store = GameLake(lake)
+        write_expert(store, 1)
+        cfg, t = self.finished(lake, paths={"warmstart": None, "expert": "lake:expert"})
+        original = GameLake(lake).meta(t.run.run_id)["sources"]
+        write_expert(store, 2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            again = self.trainer({**cfg, "resume": t.run.run_id})
+        again.close()
+        meta = GameLake(lake).meta(t.run.run_id)
+        self.assertEqual((meta["kind"], meta["sources"]), ("train", original))
+        self.assertEqual(original["expert"]["version"], 1)
+
+    def test_bc_run_cannot_be_resumed_as_train(self):
+        lake = tempfile.mkdtemp()
+        store = GameLake(lake)
+        with store.open({"agent": "impala", "preset": "x"}, "bc", streams=("metrics",)) as run:
+            run.ckpt_path("final").write_bytes(b"x")
+        with self.assertRaises(ValueError):
+            store.plan_resume({"agent": "impala", "resume": run.run_id})
+
+    def test_fork_copies_snapshots_and_never_prunes_the_source_run(self):
+        cfg, t = self.finished(tempfile.mkdtemp())
+        rating = lg.TS_ENV.create_rating
+        t = self.trainer({**cfg, "run_id": "src2"}, stop_at=2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            for i in range(3):
+                p = t.checkpoint_dir / f"old_{i}.pt"
+                t.agent.save_snapshot(p)
+                t.league.add_snapshot(f"old_{i}", str(p), t.agent.weights(), rating(mu=10.0 + i, sigma=1.0))
+            t.league.save()
+            t._save_checkpoint("final")
+        t.close()
+        src = sorted(p.name for p in t.checkpoint_dir.glob("old_*.pt"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            f = self.trainer({**cfg, "resume": str(t.run.ckpt_path("final"))})
+            f.league.max_snapshots = 4
+            for i in range(8):
+                p = f.checkpoint_dir / f"new_{i}.pt"
+                f.agent.save_snapshot(p)
+                f.league.add_snapshot(f"new_{i}", str(p), f.agent.weights(), rating(mu=40.0 + 5 * i, sigma=1.0))
+        self.assertEqual(sorted(p.name for p in t.checkpoint_dir.glob("old_*.pt")), src)
+        self.assertTrue(all(Path(m.weights_path).parent == f.checkpoint_dir for m in f.league.members.values() if m.weights_path))
+        f.close()
+
+    def test_close_kills_workers_even_if_run_close_raises(self):
+        t = self.trainer(short_cfg("impala", tempfile.mkdtemp()))
+        killed = []
+        tr.ray.kill = lambda w: killed.append(w)
+        def boom():
+            raise OSError("disk full")
+        t.run.close = boom
+        with contextlib.redirect_stdout(io.StringIO()):
+            t.close()
+        self.assertEqual(len(killed), len(t.workers))
+
+    def test_run_ids_are_unique_within_one_second(self):
+        store = GameLake(tempfile.mkdtemp())
+        ids = {store.new_run_id("impala", "p") for _ in range(5)}
+        self.assertEqual(len(ids), 5)
+
     def test_resume_target_that_does_not_exist_fails(self):
         lake = tempfile.mkdtemp()
         for target in ("latest", "nope", "/nonexistent/ckpt.pt"):
@@ -261,7 +348,7 @@ class FailFast(Patched):
         self.assertTrue(t.agent.warmstarted)
         t.close()
 
-    def test_none_means_off_and_dreamer_ignores_sources(self):
+    def test_none_means_off_and_dreamer_rejects_sources(self):
         lake = tempfile.mkdtemp()
         for kind in ("impala", "dreamer"):
             t = tr.LeagueTrainer(short_cfg(kind, lake))
@@ -269,8 +356,21 @@ class FailFast(Patched):
             self.assertIsNone(getattr(t.agent, "expert", None))
             t.close()
         cfg = short_cfg("dreamer", lake)
-        cfg["paths"].update(warmstart="lake:bc", expert="lake:expert")
-        tr.LeagueTrainer(cfg).close()
+        cfg["paths"].update(warmstart="/nonexistent/w.pt", expert="/nonexistent/e.parquet")
+        with self.assertRaises(ValueError):
+            tr.LeagueTrainer(cfg)
+
+    def test_dreamer_default_paths_are_off(self):
+        captured = {}
+        old = tr.LeagueTrainer, tr.ray_init, tr.free_cpu_error
+        tr.ray_init, tr.free_cpu_error = (lambda cfg: None), (lambda cfg: None)
+        tr.LeagueTrainer = lambda cfg: captured.setdefault("cfg", cfg) and (_ for _ in ()).throw(Stop())
+        try:
+            with self.assertRaises(Stop), contextlib.redirect_stdout(io.StringIO()):
+                tr.run({"agent": "dreamer", "lake": tempfile.mkdtemp()})
+        finally:
+            tr.LeagueTrainer, tr.ray_init, tr.free_cpu_error = old
+        self.assertEqual(captured["cfg"]["paths"], {"warmstart": None, "expert": None})
 
     def test_agent_rejects_missing_files_directly(self):
         spec = tr.agent_spec(small_cfg("impala"))

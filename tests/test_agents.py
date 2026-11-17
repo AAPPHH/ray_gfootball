@@ -19,7 +19,7 @@ import agents as ag
 import football_env as fe
 import league as lg
 import train as tr
-from store import GameLake, read_table
+from football_env import GameLake, read_table
 
 SMALL = {
     "learner": {"num_workers": 1, "rollout_len": 200, "batch_size": 1, "goal_traj_len": 8},

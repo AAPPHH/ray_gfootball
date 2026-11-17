@@ -94,8 +94,8 @@ python main/train.py '{"mode": "gen_expert"}'
 python main/train.py '{"mode": "bc"}'
 python main/train.py '{"agent": "impala"}'
 ```
-`gen_expert` writes the lake dataset `expert` (new version per call). `bc` trains on `paths.expert` and writes a run of kind `bc` whose `checkpoints/final.pt` is the warmstart; the run records the dataset name and version. `train` reads `paths.warmstart` and `paths.expert` (IMPALA only; the expert gate `impala.expert_threshold` closes at >70% vs the hard bot).
-`paths` entries accept `lake:expert` (latest), `lake:expert@3` (pinned version), `lake:bc` (newest bc run), `lake:bc@<run_id>`, a plain file path, or `None` (off). A configured source that cannot be resolved or does not fit the network aborts the start with an error. Resume: `"resume": "<run_id>"` or `"latest"` continues that run, `"resume": "<checkpoint path>"` starts a new run and records `resume_source`.
+`gen_expert` writes the lake dataset `expert` (new version per call). `bc` trains on `paths.expert` and writes a run of kind `bc` whose `checkpoints/final.pt` is the warmstart; the run records the dataset name and version. `train` reads `paths.warmstart` and `paths.expert` (IMPALA; dreamer defaults to `None` for both and raises on a configured source; the expert gate `impala.expert_threshold` closes at >70% vs the hard bot).
+`paths` entries accept `lake:expert` (latest), `lake:expert@3` (pinned version), `lake:bc` (newest bc run), `lake:bc@<run_id>`, a plain file path, or `None` (off). A configured source that cannot be resolved or does not fit the network aborts the start with an error. Resume: `"resume": "<run_id>"` or `"latest"` continues that run, `"resume": "<checkpoint path>"` starts a new run, copies the source run's league snapshots into it and records `resume_source`. Resuming a run keeps its original pinned sources; `final.pt` wins over an older `ckpt_<n>.pt`; `wall_s` continues.
 
 ### Lake layout
 One lake root per project: `CONFIG["lake"]` (default `lake/` in the repo, `GF_LAKE` overrides).
@@ -104,7 +104,7 @@ lake/
 ├── runs/<agent>_<preset>_<ts>/    # or bc_<preset>_<ts>, run_id can be set via "run_id"
 │   ├── run_meta.json              # full effective CONFIG, git hash, resolved sources, resume_source
 │   ├── checkpoints/               # ckpt_<update>.pt, final.pt
-│   ├── league.pkl, snapshot_*.pt
+│   ├── league.pkl, snap_u<N>_r<mu>.pt, snapshot_warmstart.pt
 │   └── metrics / games / eval     # streams (live arrow, rolled to parquet)
 └── datasets/expert/v<n>/          # versioned, meta.json has teacher, opponents, games, quality report
 ```
@@ -127,11 +127,10 @@ Streams: `metrics` (one row per log line), `games` (one row per finished game), 
 
 ```
 main/
-├── football_env.py       # Env, bots, features
+├── football_env.py       # Env, bots, features, lake runs, datasets, lake: references
 ├── league.py             # TrueSkill league, workers, evaluator
 ├── agents.py             # Agent interface, IMPALA, Dreamer, BC warmstart
 ├── train.py              # CONFIG and LeagueTrainer
-├── store.py              # Lake access: runs, datasets, lake: references
 └── smoke.py              # Short run of either agent
 ```
 
@@ -202,6 +201,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 **Total Domination Achieved.** 🏆
 ## Modular agents (dev-modular)
 
-`main/` is split by theme: `football_env.py` (env, bots, features, reward events), `league.py` (TrueSkill league, workers, evaluator, dispatcher), `agents.py` (common `Agent` interface, `ImpalaAgent`, `DreamerAgent`, BC warmstart), `train.py` (one `CONFIG`, `CONFIG["agent"]` = `"impala"` or `"dreamer"`), `store.py` (lake runs, datasets, source resolution), `smoke.py` (short run of either agent).
+`main/` is split by theme: `football_env.py` (env, bots, features, reward events, lake runs, datasets and source resolution), `league.py` (TrueSkill league, workers, evaluator, dispatcher), `agents.py` (common `Agent` interface, `ImpalaAgent`, `DreamerAgent`, BC warmstart), `train.py` (one `CONFIG`, `CONFIG["agent"]` = `"impala"` or `"dreamer"`), `smoke.py` (short run of either agent).
 
 Overrides without argparse are a JSON dict: `python main/train.py '{"agent": "dreamer"}'`. BC warmstart: `'{"mode": "bc"}'` (needs the `expert` dataset). Tests: `python -m unittest discover -s tests`.

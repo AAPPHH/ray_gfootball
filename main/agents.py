@@ -13,7 +13,7 @@ from deep_rl_architectures import dreamer as DR
 from deep_rl_architectures.dreamer_core import Replay
 from deep_rl_architectures.impala import PopArtAdapter, impala_loss, impala_targets
 from deep_rl_architectures.sil import GoldenMemory, sil_clipped_step, sil_mc_returns
-from store import read_table
+from football_env import read_table
 from football_env import FEATURE_DIM, NO_ACTION, NUM_ACTIONS, OBS_DIM, FeatureEngineer
 
 VTRACE = {"rho_bar": 1.0, "c_bar": 1.0, "log_rho_clip": 20.0, "adv_sigma_norm": False, "value_loss_form": "mse"}

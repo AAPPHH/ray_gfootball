@@ -1,6 +1,7 @@
 import time
 import math
 import pickle
+import shutil
 from pathlib import Path
 from collections import deque
 from dataclasses import dataclass, field
@@ -330,6 +331,18 @@ class PureLeague:
             icon = "🤖" if mtype == "bot" else "📸"
             print(f"{champ}{i:2d}. {icon} {name:25s} μ={m.rating.mu:5.1f} σ={m.rating.sigma:4.2f} skill={skill:5.1f} games={m.games_played:4d} agent_wr={(1 - m.recent_win_rate - m.recent_draw_rate)*100:4.0f}%")
         print("="*70)
+
+    def adopt_snapshots(self, directory: Path):
+        directory = Path(directory).resolve()
+        for name, m in self.members.items():
+            if m.member_type != "snapshot" or not m.weights_path:
+                continue
+            src = Path(m.weights_path)
+            if src.resolve().parent == directory or not src.is_file():
+                continue
+            dst = directory / f"{name}.pt"
+            shutil.copy2(src, dst)
+            m.weights_path = str(dst)
 
     def save(self, path: Path = None):
         path = path or (self.checkpoint_dir / "league.pkl")

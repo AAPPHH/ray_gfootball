@@ -80,7 +80,7 @@ def run():
     import torch
     import league
     import train
-    from store import GameLake
+    from football_env import GameLake
     cfg = train.deep_merge(copy.deepcopy(train.CONFIG), {**copy.deepcopy(CONFIG["overrides"]), "agent": CONFIG["agent"]})
     cfg.update(preset="smoke", min_free_cpus=CONFIG["min_free_cpus"])
     if CONFIG["lake"]:
@@ -88,7 +88,6 @@ def run():
     store = GameLake(cfg["lake"])
     cfg["run_id"] = cfg["run_id"] or store.new_run_id(cfg["agent"], "smoke")
     out = store.lake.run_dir(cfg["run_id"])
-    out.mkdir(parents=True, exist_ok=True)
     state = {"done": 0, "finite": True, "last": None, "sil_calls": 0, "model_updates": 0.0}
     workers = cfg["learner"]["num_workers"]
     torch.set_num_threads(cfg["learner"]["driver_threads"])
@@ -99,9 +98,14 @@ def run():
     error = train.free_cpu_error(cfg)
     if error:
         ray.shutdown()
+        try:
+            out.rmdir()
+        except OSError:
+            pass
         summary["error"] = error
         print(json.dumps(summary))
         return 1
+    out.mkdir(parents=True, exist_ok=True)
     bounded = BoundedRay(ray, CONFIG["call_timeout_s"], CONFIG["poll_s"], t0 + CONFIG["timeout_s"])
     train.ray = league.ray = bounded
     try:
