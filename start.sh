@@ -7,21 +7,21 @@
 #SBATCH --cpus-per-task=96
 #SBATCH --mem-per-cpu=9GB
 #SBATCH --time=90-00:00:00
-#SBATCH --output=/home/john/rlib_gfootball/ray_%j.out
-#SBATCH --error=/home/john/rlib_gfootball/ray_%j.err
+#SBATCH --output=ray_%j.out
+#SBATCH --error=ray_%j.err
 
 set -x
 
 : "${SLURM_GPUS_PER_TASK:=0}"
 
 # Initialize conda
-source /home/john/miniforge/etc/profile.d/conda.sh
+source $HOME/miniforge/etc/profile.d/conda.sh
 conda activate football_cuda
 
 # Remove ~/.local/bin from PATH and ensure conda env is first
-export PATH=$(echo $PATH | tr ':' '\n' | grep -v "^/home/john/.local/bin$" | tr '\n' ':' | sed 's/:$//')
-export PATH="/home/john/miniforge/envs/football_cuda/bin:$PATH"
-export LD_LIBRARY_PATH="/home/john/miniforge/envs/football_cuda/lib:${LD_LIBRARY_PATH}"
+export PATH=$(echo $PATH | tr ':' '\n' | grep -v "^$HOME/.local/bin$" | tr '\n' ':' | sed 's/:$//')
+export PATH="$HOME/miniforge/envs/football_cuda/bin:$PATH"
+export LD_LIBRARY_PATH="$HOME/miniforge/envs/football_cuda/lib:${LD_LIBRARY_PATH}"
 
 # Verify we're using the correct versions
 echo "=== Version Check ==="
@@ -34,7 +34,7 @@ echo "===================="
 #==============================================================================
 
 # Echte Daten auf gemounteten Speicher (viel Platz)
-BASE_STORAGE=/home/john/rlib_gfootball/ray_temp_${SLURM_JOB_ID}
+BASE_STORAGE=$HOME/rlib_gfootball/ray_temp_${SLURM_JOB_ID}
 mkdir -p "$BASE_STORAGE"
 
 NODE=$(hostname -s)
@@ -75,9 +75,9 @@ echo "IP Head: $ip_head"
 echo "Starte HEAD auf $head_node"
 
 srun --nodes=1 --ntasks=1 -w "$head_node" bash <<EOFHEAD &
-export PATH="/home/john/miniforge/envs/football_cuda/bin:\$PATH"
-export LD_LIBRARY_PATH="/home/john/miniforge/envs/football_cuda/lib:\$LD_LIBRARY_PATH"
-/home/john/miniforge/envs/football_cuda/bin/ray start --head \
+export PATH="$HOME/miniforge/envs/football_cuda/bin:\$PATH"
+export LD_LIBRARY_PATH="$HOME/miniforge/envs/football_cuda/lib:\$LD_LIBRARY_PATH"
+$HOME/miniforge/envs/football_cuda/bin/ray start --head \
     --node-ip-address='$head_node_ip' \
     --port=$port \
     --dashboard-host=0.0.0.0 \
@@ -98,8 +98,8 @@ for ((i = 1; i <= worker_num; i++)); do
     echo "Starte WORKER $i auf $node_i mit IP $node_ip"
     
     srun --nodes=1 --ntasks=1 -w "$node_i" bash <<EOFWORKER &
-export PATH="/home/john/miniforge/envs/football_cuda/bin:\$PATH"
-export LD_LIBRARY_PATH="/home/john/miniforge/envs/football_cuda/lib:\$LD_LIBRARY_PATH"
+export PATH="$HOME/miniforge/envs/football_cuda/bin:\$PATH"
+export LD_LIBRARY_PATH="$HOME/miniforge/envs/football_cuda/lib:\$LD_LIBRARY_PATH"
 
 BASE_STORAGE="$BASE_STORAGE"
 
@@ -141,18 +141,18 @@ GPU_WORKER_JOB=$(sbatch --parsable <<EOFGPU
 #SBATCH --gres=gpu:1
 #SBATCH --mem-per-cpu=6GB
 #SBATCH --time=90-00:00:00
-#SBATCH --output=/home/john/rlib_gfootball/ray_gpu_worker_${SLURM_JOB_ID}_%j.out
-#SBATCH --error=/home/john/rlib_gfootball/ray_gpu_worker_${SLURM_JOB_ID}_%j.err
+#SBATCH --output=ray_gpu_worker_${SLURM_JOB_ID}_%j.out
+#SBATCH --error=ray_gpu_worker_${SLURM_JOB_ID}_%j.err
 
-source /home/john/miniforge/etc/profile.d/conda.sh
+source $HOME/miniforge/etc/profile.d/conda.sh
 conda activate football_cuda
 
-export PATH=\$(echo \$PATH | tr ':' '\n' | grep -v "^/home/john/.local/bin\$" | tr '\n' ':' | sed 's/:\$//')
-export PATH="/home/john/miniforge/envs/football_cuda/bin:\$PATH"
-export LD_LIBRARY_PATH="/home/john/miniforge/envs/football_cuda/lib:\${LD_LIBRARY_PATH}"
+export PATH=\$(echo \$PATH | tr ':' '\n' | grep -v "^$HOME/.local/bin\$" | tr '\n' ':' | sed 's/:\$//')
+export PATH="$HOME/miniforge/envs/football_cuda/bin:\$PATH"
+export LD_LIBRARY_PATH="$HOME/miniforge/envs/football_cuda/lib:\${LD_LIBRARY_PATH}"
 
 # Real storage auf gemounteten Speicher
-BASE_STORAGE=/home/john/rlib_gfootball/ray_temp_${SLURM_JOB_ID}
+BASE_STORAGE=$HOME/rlib_gfootball/ray_temp_${SLURM_JOB_ID}
 GPU_NODE=\$(hostname -s)
 mkdir -p \$BASE_STORAGE/\$GPU_NODE
 
@@ -180,7 +180,7 @@ echo "======================"
 ping -c 3 $head_node_ip && echo "✓ Head reachable" || echo "✗ Cannot reach head!"
 
 echo "Starting Ray worker..."
-/home/john/miniforge/envs/football_cuda/bin/ray start --address='$ip_head' \
+$HOME/miniforge/envs/football_cuda/bin/ray start --address='$ip_head' \
     --node-ip-address="\$GPU_NODE_IP" \
     --num-cpus=256 \
     --num-gpus=1 \
@@ -219,7 +219,7 @@ fi
 #==============================================================================
 
 echo "Führe die Python-Anwendung aus..."
-python -u /home/john/rlib_gfootball/main.py "$SLURM_CPUS_PER_TASK"
+python -u $HOME/rlib_gfootball/main.py "$SLURM_CPUS_PER_TASK"
 
 #==============================================================================
 # Aufräumen
