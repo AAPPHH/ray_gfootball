@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import math
-import shutil
 import time
 from pathlib import Path
 
@@ -22,14 +21,14 @@ CONFIG = {
     "call_timeout_s": 300,
     "poll_s": 5,
     "min_free_cpus": 8,
-    "out_dir": None,
+    "lake": None,
     "overrides": {
         "ray": {"address": "auto", "worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * 1024 ** 3}, "env_vars": {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}},
         "learner": {"num_workers": 4, "rollout_len": 512, "batch_size": 4, "goal_traj_len": 64, "driver_threads": 4},
         "impala": {"golden_capacity": 256},
         "dreamer": DREAMER_SMALL,
         "eval": {"every": 0},
-        "paths": {"warmstart": None, "expert_parquet": None},
+        "paths": {"warmstart": None, "expert": None},
     },
 }
 
@@ -81,12 +80,15 @@ def run():
     import torch
     import league
     import train
+    from store import GameLake
     cfg = train.deep_merge(copy.deepcopy(train.CONFIG), {**copy.deepcopy(CONFIG["overrides"]), "agent": CONFIG["agent"]})
-    out = Path(CONFIG["out_dir"] or Path(train.GF_RUNS) / cfg["agent"] / "smoke")
-    cfg["paths"]["checkpoint_dir"] = str(out / "checkpoints")
-    cfg["min_free_cpus"] = CONFIG["min_free_cpus"]
-    shutil.rmtree(out, ignore_errors=True)
-    out.mkdir(parents=True)
+    cfg.update(preset="smoke", min_free_cpus=CONFIG["min_free_cpus"])
+    if CONFIG["lake"]:
+        cfg["lake"] = CONFIG["lake"]
+    store = GameLake(cfg["lake"])
+    cfg["run_id"] = cfg["run_id"] or store.new_run_id(cfg["agent"], "smoke")
+    out = store.lake.run_dir(cfg["run_id"])
+    out.mkdir(parents=True, exist_ok=True)
     state = {"done": 0, "finite": True, "last": None, "sil_calls": 0, "model_updates": 0.0}
     workers = cfg["learner"]["num_workers"]
     torch.set_num_threads(cfg["learner"]["driver_threads"])

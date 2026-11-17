@@ -1,4 +1,3 @@
-import json
 import time
 import math
 import pickle
@@ -552,11 +551,11 @@ class EvalCore(SelfPlayCore):
 Evaluator = ray.remote(EvalCore)
 
 class EvalRunner:
-    def __init__(self, cfg: dict, spec: dict, rollout_len: int, out_path: Path):
+    def __init__(self, cfg: dict, spec: dict, rollout_len: int, sink=None):
         invalid = [b for b in cfg["bots"] if b not in BUILTIN_BOTS]
         if invalid:
             raise ValueError(f"eval.bots {invalid} not allowed, only built-in bots {list(BUILTIN_BOTS)}")
-        self.cfg, self.out_path = cfg, Path(out_path)
+        self.cfg, self.sink = cfg, sink
         self.make = lambda: Evaluator.options(**cfg["actor"]).remote(spec, rollout_len, cfg["torch_threads"], cfg["greedy"])
         self.actors = {bot: self.make() for bot in cfg["bots"]} if cfg["every"] > 0 else {}
         self.refs, self.results, self.errors, self.meta = {}, {}, {}, None
@@ -587,8 +586,8 @@ class EvalRunner:
         meta = dict(self.meta)
         wall = round(time.time() - meta.pop("start"), 1)
         record = {**meta, "wall_s": wall, "bots": self.results, "errors": self.errors, "n_errors": len(self.errors)}
-        with open(self.out_path, "a") as f:
-            f.write(json.dumps(record) + "\n")
+        if self.sink:
+            self.sink([{**meta, "wall_s": wall, "bot": bot, **r} for bot, r in self.results.items()] + [{**meta, "wall_s": wall, "bot": bot, "error": err} for bot, err in self.errors.items()])
         self.last = record
         print("  EVAL u{update} ".format(**record) + " ".join(f"{b.replace('bot_', '')[0].upper()}:{r['win']}/{r['draw']}/{r['loss']} wr={r['win_rate']*100:.0f}% [{r['ci_lo']*100:.0f},{r['ci_hi']*100:.0f}] gd={r['goal_diff']:+.2f}" for b, r in record["bots"].items()))
         return record

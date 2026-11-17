@@ -11,17 +11,19 @@ import ray
 import deep_rl_architectures
 from agents import VTRACE, BCWarmstart, make_agent
 from football_env import generate_expert
+from store import GameLake
 from league import TS_ENV, EvalRunner, PureLeague, SelfPlayWorker, StickyDispatcher
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 GIB = 1024 ** 3
-GF_DATA = os.environ.get("GF_DATA", str(ROOT / "data"))
-GF_RUNS = os.environ.get("GF_RUNS", str(ROOT / "runs"))
 CONFIG = {
     "agent": "impala",
     "mode": "train",
-    "paths": {"warmstart": str(ROOT / "bc_warmstart_v2.pt"), "expert_parquet": GF_DATA + "/expert.parquet", "checkpoint_dir": "./checkpoints_league_v77"},
+    "preset": "default",
+    "run_id": None,
+    "lake": os.environ.get("GF_LAKE", "lake"),
+    "paths": {"warmstart": "lake:bc", "expert": "lake:expert"},
     "min_free_cpus": 8,
     "env": {"rewards": "scoring"},
     "ray": {"address": "auto", "namespace": None, "worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}, "env_vars": {"OMP_NUM_THREADS": "1"}},
@@ -51,10 +53,10 @@ CONFIG = {
             "trunc_decay": 0.99, "ens_boot": 0.8, "ens_graph": False,
         },
     ),
-    "eval": {"every": 50, "greedy": False, "games": 50, "bots": ["bot_easy", "bot_medium", "bot_hard"], "file": "eval.jsonl", "torch_threads": 1,
+    "eval": {"every": 50, "greedy": False, "games": 50, "bots": ["bot_easy", "bot_medium", "bot_hard"], "torch_threads": 1,
              "actor": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}},
     "expert_gen": {
-        "games": 80, "opponents": ["bot_easy"], "keep": "win", "max_steps": 3000, "workers": 0, "out": GF_DATA + "/expert.parquet",
+        "games": 80, "opponents": ["bot_easy"], "keep": "win", "max_steps": 3000, "workers": 0, "dataset": "expert",
         "ray_worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB},
         "teacher": {"deadzone": 0.01, "own_ball_dist": 0.03, "shot_dist": 0.3, "shot_x": 0.7, "shot_y": 0.2, "press_dist": 0.1, "pass_dist": 0.4, "slide_dist": 0.05, "slide_cooldown": 60, "sprint_dist": 0.25},
     },
@@ -67,8 +69,8 @@ CONFIG = {
 }
 
 CPU_TRY = {
-    "agent": "dreamer", "train_seconds": 1800, "min_free_cpus": 8,
-    "paths": {"checkpoint_dir": GF_RUNS, "warmstart": None, "expert_parquet": None},
+    "agent": "dreamer", "preset": "CPU_TRY", "train_seconds": 1800, "min_free_cpus": 8,
+    "paths": {"warmstart": None, "expert": None},
     "ray": {"worker": {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB}, "env_vars": {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}},
     "learner": {"num_workers": 6, "rollout_len": 512, "batch_size": 6, "goal_traj_len": 64, "driver_threads": 2},
     "dreamer": {"device": "cpu", "replay_cap": 150_000, "prefill": 6000, "train_ratio": 16, "max_updates": None,
@@ -78,7 +80,7 @@ CPU_TRY = {
 
 GFB = {"num_cpus": 1, "num_gpus": 0, "memory": 2 * GIB, "resources": {"gfootball": 1}}
 GPU_COMMON = {
-    "paths": {"checkpoint_dir": GF_RUNS, "warmstart": None, "expert_parquet": None},
+    "paths": {"warmstart": None, "expert": None},
     "env": {"rewards": "scoring,checkpoints"},
     "ray": {"address": os.environ.get("RAY_ADDRESS", "auto"), "worker": dict(GFB, resources=dict(GFB["resources"])), "env_vars": {"OMP_NUM_THREADS": "1"}},
     "eval": {"every": 50, "games": 30, "bots": ["bot_easy", "bot_medium", "bot_hard"], "actor": dict(GFB, resources=dict(GFB["resources"]))},
@@ -86,9 +88,9 @@ GPU_COMMON = {
     "checkpoint_every": 50, "log_every": 10,
 }
 GPU_E0 = copy.deepcopy(GPU_COMMON)
-GPU_E0.update({"agent": "impala", "learner": {"num_workers": 16}, "impala": {"device": "cuda"}})
+GPU_E0.update({"agent": "impala", "preset": "GPU_E0", "learner": {"num_workers": 16}, "impala": {"device": "cuda"}})
 GPU_D0 = copy.deepcopy(GPU_COMMON)
-GPU_D0.update({"agent": "dreamer", "learner": {"num_workers": 12},
+GPU_D0.update({"agent": "dreamer", "preset": "GPU_D0", "learner": {"num_workers": 12},
                "dreamer": {"device": "cuda", "train_ratio": 32, "replay_cap": 1_000_000, "prefill": 20_000, "model": {"units": 512, "deter": 512, "hidden": 512}}})
 RUNS = {"CPU_TRY": CPU_TRY, "GPU_E0": GPU_E0, "GPU_D0": GPU_D0}
 
@@ -97,11 +99,12 @@ def deep_merge(base: dict, over: dict) -> dict:
         base[k] = deep_merge(base[k], v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v
     return base
 
-def agent_spec(cfg: dict) -> dict:
-    kind, paths, l = cfg["agent"], cfg["paths"], cfg["learner"]
+def agent_spec(cfg: dict, resolve: bool = True) -> dict:
+    kind, l = cfg["agent"], cfg["learner"]
     spec = {"agent": kind, **copy.deepcopy(cfg[kind]), **{k: l[k] for k in ("rollout_len", "batch_size", "goal_traj_len", "num_workers")}}
-    if kind == "impala":
-        spec.update(warmstart=paths["warmstart"], expert_parquet=paths["expert_parquet"])
+    if kind == "impala" and resolve:
+        src = GameLake(cfg["lake"]).sources(cfg)
+        spec.update(sources=src, **{k: v["path"] if v else None for k, v in src.items()})
     return spec
 
 def ray_init(cfg: dict):
@@ -124,17 +127,21 @@ class LeagueTrainer:
         l = cfg["learner"]
         self.cfg, self.num_workers, self.rollout_len, self.batch_size = cfg, l["num_workers"], l["rollout_len"], l["batch_size"]
         self.spec = agent_spec(cfg)
-        self.checkpoint_dir = Path(cfg["paths"]["checkpoint_dir"]) / cfg["agent"]
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.store = GameLake(cfg["lake"])
+        run_id, ckpt, source = self.store.plan_resume(cfg)
         self.agent = make_agent(self.spec, learner=True)
+        self.run = self.store.open(cfg, "train", run_id=run_id or cfg.get("run_id"), resume_source=source)
+        self.run.update_meta(sources=self.spec.get("sources"))
+        self.checkpoint_dir = self.run.run_dir
         self.current_rating = TS_ENV.create_rating(mu=25.0, sigma=8.333)
         self.league = PureLeague(
             checkpoint_dir=self.checkpoint_dir, spec=self.spec,
             **{k: l[k] for k in ("max_snapshots", "snapshot_on_rating_gain", "snapshot_on_champion_wins", "bot_floor", "latest_snapshot_prob", "min_skill_spacing", "min_policy_distance")}
         )
         self.agent.attach(self.league)
-        if (self.checkpoint_dir / "league.pkl").exists():
-            self.league.load()
+        league_file = (Path(ckpt).parent.parent if ckpt else self.checkpoint_dir) / "league.pkl"
+        if league_file.exists():
+            self.league.load(league_file)
         if self.agent.warmstarted:
             snap_path = self.checkpoint_dir / "snapshot_warmstart.pt"
             if not snap_path.exists():
@@ -142,18 +149,17 @@ class LeagueTrainer:
             if "warmstart" not in self.league.members:
                 self.league.add_snapshot("warmstart", str(snap_path), self.agent.weights(), TS_ENV.create_rating(mu=25.0, sigma=8.0))
         self.total_steps = self.total_matches = self.updates = 0
-        self._resume(cfg["resume"])
+        self._resume(ckpt)
         self.workers = [SelfPlayWorker.options(**cfg["ray"]["worker"]).remote(i, self.spec, self.rollout_len, l["goal_traj_len"]) for i in range(self.num_workers)]
         self.start = None
         self.ep_wins, self.ep_draws, self.ep_losses, self.returns, self.lengths, self.returns_vs_hard, self.goal_diffs = (deque(maxlen=100) for _ in range(7))
         self.pending, self.queue = {}, []
         self._weights_at = (None, None)
-        self.evaluator = EvalRunner(cfg["eval"], self.spec, self.rollout_len, self.checkpoint_dir / cfg["eval"]["file"])
+        self.evaluator = EvalRunner(cfg["eval"], self.spec, self.rollout_len, lambda rows: self.run.log("eval", rows))
         self.dispatcher = StickyDispatcher(self.league, ["random", "lazy", "bot_easy", "bot_medium", "bot_hard"])
         print(f"{cfg['agent']} + PFSP League | rewards={cfg['env']['rewards']} | {self.num_workers}W | batch {self.batch_size} x {self.rollout_len} | mu={self.current_rating.mu:.1f}")
 
-    def _resume(self, resume):
-        path = max(self.checkpoint_dir.glob("ckpt_*.pt"), key=lambda p: p.stat().st_mtime, default=None) if resume == "latest" else resume
+    def _resume(self, path):
         if not path:
             return
         ck = self.agent.load(path)
@@ -202,6 +208,9 @@ class LeagueTrainer:
         games_str = "/".join(f"{n.replace('bot_', '')[0]}{g}" for n, g in league_stats['games_by_opp'].items()) + f"/s{league_stats['snap_games']}"
         opp_str = " ".join(self._opp_col(tag, bot_stats.get(name, {})) for tag, name in (("E", "bot_easy"), ("M", "bot_medium"), ("H", "bot_hard")))
         champ = league_stats['champion'] or "none"
+        self.run.log("metrics", {"update": self.updates, "frames": self.total_steps, "wall_s": elapsed, "matches": self.total_matches, "rating_mu": self.current_rating.mu, "rating_sigma": self.current_rating.sigma,
+                                 "win_rate": win_rate, "draw_rate": draw_rate, "loss_rate": loss_rate, "return_mean": float(ret), "goal_diff": float(gd), **{k: float(v) for k, v in stats.items()}})
+        self.run.flush()
         print(f"[{self.updates:4d}] {self.total_steps/1e6:.1f}M {sps/1e3:.0f}k/s {mpm:.0f}m/min {elapsed/60:.0f}m | W/D/L:{win_rate:.0f}/{draw_rate:.0f}/{loss_rate:.0f}% R:{ret:+.1f}({ret_max:+.0f}) GD:{gd:+.2f} | mu={self.current_rating.mu:.1f} sigma={self.current_rating.sigma:.2f} | {opp_str} N:{games_str} RvH:{avg_vs_hard:+.1f} | {self.agent.fmt(stats)} | {league_stats['num_snapshots']}snap champ:{champ}")
 
     def _ingest(self, ref):
@@ -219,6 +228,9 @@ class LeagueTrainer:
             if opponent_name == "bot_hard":
                 self.returns_vs_hard.append(ep['return'])
             self.current_rating = self.league.report_game(opponent_name, self.current_rating, won=ep['won'], drawn=ep['drawn'])
+            self.run.log("games", {"update": self.updates, "frames": self.total_steps, "worker": rollout.get('wid'), "player": self.cfg["agent"], "opponent": opponent_name,
+                                   "goals_for": ep['goals_scored'], "goals_against": ep['goals_conceded'], "score": f"{ep['goals_scored']}:{ep['goals_conceded']}",
+                                   "result": "win" if ep['won'] else "draw" if ep['drawn'] else "loss", "return": float(ep['return']), "length": ep['length']})
         opp_mu = self.league.members[opponent_name].rating.mu if opponent_name in self.league.members else 25.0
         self.agent.observe(rollout, opp_mu)
         w.set_weights.remote(self._weights())
@@ -255,10 +267,11 @@ class LeagueTrainer:
         self.league.print_ranking()
 
     def _save_checkpoint(self, name: str = None):
-        path = self.checkpoint_dir / f"ckpt_{name or f'u{self.updates}'}.pt"
+        path = self.run.ckpt_path(name or self.updates)
         self.agent.save(path, {'updates': self.updates, 'total_steps': self.total_steps, 'total_matches': self.total_matches,
                                'rating_mu': self.current_rating.mu, 'rating_sigma': self.current_rating.sigma})
         self.league.save()
+        self.run.flush()
         print(f"  Saved {path}")
 
     def close(self):
@@ -271,6 +284,7 @@ class LeagueTrainer:
             self.evaluator.close()
         except Exception as e:
             print(f"  evaluator close failed: {type(e).__name__}")
+        self.run.close()
         for w in self.workers:
             try:
                 ray.get(w.close.remote(), timeout=2)
@@ -281,8 +295,15 @@ class LeagueTrainer:
 def run(overrides: dict = None):
     cfg = deep_merge(copy.deepcopy(CONFIG), overrides or {})
     torch.set_num_threads(cfg["learner"]["driver_threads"])
+    store = GameLake(cfg["lake"])
     if cfg["mode"] == "bc":
-        BCWarmstart(agent_spec({**cfg, "agent": "impala"}), cfg["paths"]["expert_parquet"], cfg["paths"]["warmstart"], **cfg["bc"]).run()
+        data = store.resolve_dataset(cfg["paths"]["expert"])
+        if data is None:
+            raise ValueError("bc mode needs paths.expert (e.g. 'lake:expert')")
+        with store.open({**cfg, "agent": "impala"}, "bc", streams=("metrics",)) as run:
+            run.update_meta(dataset={k: data.get(k) for k in ("ref", "name", "version", "path")})
+            BCWarmstart(agent_spec({**cfg, "agent": "impala"}, resolve=False), data["path"], run.ckpt_path("final"), log=lambda row: run.log("metrics", row), **cfg["bc"]).run()
+            run.flush()
         return
     if cfg["mode"] == "gen_expert":
         gen = cfg["expert_gen"]
@@ -292,8 +313,9 @@ def run(overrides: dict = None):
             if error:
                 ray.shutdown()
                 raise SystemExit(error)
-        report = generate_expert(gen)
-        print(json.dumps(report))
+        table, report = generate_expert(gen)
+        out = store.write_dataset(gen["dataset"], table, {"source": "gen_expert", "teacher": gen["teacher"], "opponents": gen["opponents"], "games": gen["games"], "keep": gen["keep"], "max_steps": gen["max_steps"], "report": report})
+        print(json.dumps({**report, "dataset": {k: out[k] for k in ("name", "version")}}))
         return report
     ray_init(cfg)
     error = free_cpu_error(cfg)
